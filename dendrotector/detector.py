@@ -23,8 +23,13 @@ GROUNDING_CONFIG_CANDIDATES = (
     "GroundingDINO_SwinT_OGC.py",
 )
 GROUNDING_WEIGHTS = "groundingdino_swint_ogc.pth"
-SAM_REPO = "facebook/sam"
-SAM_CHECKPOINT = "sam_vit_h_4b8939.pth"
+SAM_MODELS = {
+    # Mapping derived from the repositories published at
+    # https://huggingface.co/facebook for the Segment Anything checkpoints.
+    "vit_h": ("facebook/sam-vit-huge", "sam_vit_h_4b8939.pth"),
+    "vit_l": ("facebook/sam-vit-large", "sam_vit_l_0b3195.pth"),
+    "vit_b": ("facebook/sam-vit-base", "sam_vit_b_01ec64.pth"),
+}
 
 
 @dataclass
@@ -86,7 +91,16 @@ class DendroDetector:
 
     def _load_sam(self, sam_model: str) -> SamPredictor:
         download_kwargs = self._download_kwargs("sam")
-        checkpoint_path = hf_hub_download(SAM_REPO, SAM_CHECKPOINT, **download_kwargs)
+
+        try:
+            repo_id, checkpoint = SAM_MODELS[sam_model]
+        except KeyError as error:
+            known_models = ", ".join(sorted(SAM_MODELS))
+            raise ValueError(
+                f"Unsupported SAM model '{sam_model}'. Known models: {known_models}."
+            ) from error
+
+        checkpoint_path = hf_hub_download(repo_id, checkpoint, **download_kwargs)
         sam = sam_model_registry[sam_model](checkpoint=checkpoint_path)
         sam.to(device=self.device)
         return SamPredictor(sam)
