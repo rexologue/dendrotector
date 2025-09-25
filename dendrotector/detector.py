@@ -13,11 +13,15 @@ import torch
 from groundingdino.util import box_ops
 from groundingdino.util.inference import load_image, load_model, predict
 from huggingface_hub import hf_hub_download
+from huggingface_hub.errors import EntryNotFoundError
 from segment_anything import SamPredictor, sam_model_registry
 
 PROMPT = "tree . shrub . bush ."
 GROUNDING_REPO = "ShilongLiu/GroundingDINO"
-GROUNDING_CONFIG = "GroundingDINO_SwinT_OGC.py"
+GROUNDING_CONFIG_CANDIDATES = (
+    "GroundingDINO_SwinT_OGC.cfg.py",
+    "GroundingDINO_SwinT_OGC.py",
+)
 GROUNDING_WEIGHTS = "groundingdino_swint_ogc.pth"
 SAM_REPO = "facebook/sam"
 SAM_CHECKPOINT = "sam_vit_h_4b8939.pth"
@@ -62,12 +66,23 @@ class DendroDetector:
 
     def _load_groundingdino(self):
         download_kwargs = self._download_kwargs("groundingdino")
-        config_path = hf_hub_download(GROUNDING_REPO, GROUNDING_CONFIG, **download_kwargs)
+        config_path = self._download_groundingdino_config(download_kwargs)
         weights_path = hf_hub_download(GROUNDING_REPO, GROUNDING_WEIGHTS, **download_kwargs)
         model = load_model(config_path, weights_path)
         model.to(self.device)
         model.eval()
         return model
+
+    def _download_groundingdino_config(self, download_kwargs: dict) -> str:
+        last_error: EntryNotFoundError | None = None
+        for filename in GROUNDING_CONFIG_CANDIDATES:
+            try:
+                return hf_hub_download(GROUNDING_REPO, filename, **download_kwargs)
+            except EntryNotFoundError as error:
+                last_error = error
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("No GroundingDINO config candidates configured")
 
     def _load_sam(self, sam_model: str) -> SamPredictor:
         download_kwargs = self._download_kwargs("sam")
