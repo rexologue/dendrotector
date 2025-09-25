@@ -1,6 +1,6 @@
 torch>=2.1.0
 torchvision>=0.16.0
-groundingdino>=0.1.0
+groundingdino @ git+https://github.com/IDEA-Research/GroundingDINO.git@v0.1.0-alpha2
 git+https://github.com/facebookresearch/segment-anything.git
 huggingface-hub>=0.20.0
 opencv-python>=4.7.0
