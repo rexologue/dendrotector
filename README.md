@@ -35,7 +35,7 @@ To avoid this issue the project depends directly on the official GitHub reposito
 which provides the missing sources:
 
 ```bash
-pip install git+https://github.com/IDEA-Research/GroundingDINO.git@v0.1.0
+pip install git+https://github.com/IDEA-Research/GroundingDINO.git@v0.1.0-alpha2
 ```
 
 Building the CUDA/C++ extension also requires a compiler toolchain and Ninja. On
