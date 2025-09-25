@@ -21,6 +21,33 @@ pip install -r requirements.txt
 
 Both Grounding DINO and SAM weights are downloaded automatically from the Hugging Face Hub on first use. Make sure you have enough disk space (~2.5 GB) and that you are logged in with `huggingface-cli login` if the models require authentication. Use the `--models-dir` flag (or the `models_dir` argument in the Python API) to override the default cache location and store all model files in a custom directory.
 
+### Troubleshooting installation
+
+The wheel published on PyPI for Grounding DINO (`groundingdino-py`) is currently missing
+several CUDA source files. As a result, `pip install groundingdino-py` fails with an
+error similar to:
+
+```
+cc1plus: fatal error: .../groundingdino/models/GroundingDINO/csrc/vision.cpp: No such file or directory
+```
+
+To avoid this issue the project depends directly on the official GitHub repository,
+which provides the missing sources:
+
+```bash
+pip install git+https://github.com/IDEA-Research/GroundingDINO.git@v0.1.0
+```
+
+Building the CUDA/C++ extension also requires a compiler toolchain and Ninja. On
+Debian/Ubuntu you can install the prerequisites with:
+
+```bash
+sudo apt-get install build-essential ninja-build
+```
+
+If you install dependencies inside a managed environment (e.g. Google Colab), make
+sure to run the command above before invoking `pip install -r requirements.txt`.
+
 ## Usage
 
 ```bash
