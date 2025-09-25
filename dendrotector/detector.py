@@ -50,27 +50,38 @@ class DendroDetector:
         sam_model: str = "vit_h",
         box_threshold: float = 0.3,
         text_threshold: float = 0.25,
+        models_dir: os.PathLike[str] | str | None = None,
     ) -> None:
         self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
         self.box_threshold = box_threshold
         self.text_threshold = text_threshold
+        self._models_dir = Path(models_dir) if models_dir is not None else None
 
         self._dino_model = self._load_groundingdino()
         self._sam_predictor = self._load_sam(sam_model)
 
     def _load_groundingdino(self):
-        config_path = hf_hub_download(GROUNDING_REPO, GROUNDING_CONFIG)
-        weights_path = hf_hub_download(GROUNDING_REPO, GROUNDING_WEIGHTS)
+        download_kwargs = self._download_kwargs("groundingdino")
+        config_path = hf_hub_download(GROUNDING_REPO, GROUNDING_CONFIG, **download_kwargs)
+        weights_path = hf_hub_download(GROUNDING_REPO, GROUNDING_WEIGHTS, **download_kwargs)
         model = load_model(config_path, weights_path)
         model.to(self.device)
         model.eval()
         return model
 
     def _load_sam(self, sam_model: str) -> SamPredictor:
-        checkpoint_path = hf_hub_download(SAM_REPO, SAM_CHECKPOINT)
+        download_kwargs = self._download_kwargs("sam")
+        checkpoint_path = hf_hub_download(SAM_REPO, SAM_CHECKPOINT, **download_kwargs)
         sam = sam_model_registry[sam_model](checkpoint=checkpoint_path)
         sam.to(device=self.device)
         return SamPredictor(sam)
+
+    def _download_kwargs(self, subdir: str) -> dict:
+        if self._models_dir is None:
+            return {}
+        target_dir = self._models_dir / subdir
+        target_dir.mkdir(parents=True, exist_ok=True)
+        return {"local_dir": str(target_dir), "local_dir_use_symlinks": False}
 
     def detect(
         self,
