@@ -19,7 +19,7 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Both Grounding DINO and SAM weights are downloaded automatically from the Hugging Face Hub on first use. Make sure you have enough disk space (~2.5 GB) and that you are logged in with `huggingface-cli login` if the models require authentication.
+Both Grounding DINO and SAM weights are downloaded automatically from the Hugging Face Hub on first use. Make sure you have enough disk space (~2.5 GB) and that you are logged in with `huggingface-cli login` if the models require authentication. Use the `--models-dir` flag (or the `models_dir` argument in the Python API) to override the default cache location and store all model files in a custom directory.
 
 ## Usage
 
@@ -37,6 +37,9 @@ You can tweak the detection thresholds if you want to be more or less conservati
 
 ```bash
 python -m dendrotector path/to/image.jpg --box-threshold 0.25 --text-threshold 0.2
+
+# Store all downloaded models inside ./weights instead of the default cache
+python -m dendrotector path/to/image.jpg --models-dir weights
 ```
 
 To run the detector on a specific device (e.g. CUDA) explicitly, pass `--device cuda`. On machines equipped with NVIDIA GPUs such as the H100, CUDA will be selected automatically when available.
@@ -46,7 +49,7 @@ To run the detector on a specific device (e.g. CUDA) explicitly, pass `--device 
 ```python
 from dendrotector import DendroDetector
 
-detector = DendroDetector()
+detector = DendroDetector(models_dir="weights")
 results = detector.detect("forest.jpg", "outputs/forest")
 
 for result in results:

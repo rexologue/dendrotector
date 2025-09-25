@@ -29,6 +29,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         help="Computation device to run on (defaults to CUDA if available)",
     )
+    parser.add_argument(
+        "--models-dir",
+        type=Path,
+        default=None,
+        help="Directory where model weights should be stored",
+    )
     return parser
 
 
@@ -40,6 +46,7 @@ def main(argv: list[str] | None = None) -> None:
         device=args.device,
         box_threshold=args.box_threshold,
         text_threshold=args.text_threshold,
+        models_dir=args.models_dir,
     )
     results = detector.detect(args.image, args.output_dir, multimask_output=args.multimask)
 
