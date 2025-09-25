@@ -47,7 +47,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--multimask-output",
         action="store_true",
-        help="Ask SAM for multiple mask hypotheses per detection.",
+        help="Ask SAM 2 for multiple mask hypotheses per detection.",
     )
     return parser
 

@@ -21,7 +21,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--multimask",
         action="store_true",
-        help="Return multiple SAM masks per detection and keep the best IoU mask",
+        help="Return multiple SAM 2 masks per detection and keep the best IoU mask",
     )
     parser.add_argument(
         "--device",
