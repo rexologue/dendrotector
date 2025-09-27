@@ -1,4 +1,26 @@
-"""Species classification for detected trees and shrubs."""
+"""Species classification for detected trees and shrubs.
+
+The previous placeholder implementation relied on a generic ImageNet model,
+which yielded coarse labels such as ``"oak"`` or ``"pine"`` at best.  This file
+now integrates a pretrained tree-focused classifier published on the Hugging
+Face Hub: :mod:`OttoYu/TreeClassification`.  The model is a fine-tuned
+`Swin Transformer <https://huggingface.co/docs/transformers/model_doc/swin>`_
+that was trained on a curated dataset of subtropical tree and shrub species.
+It predicts 13 classes including *Araucaria columnaris*, *Callistemon
+viminalis*, *Hibiscus tiliaceus*, and other ornamental species commonly found
+in public datasets such as TreeSpecies.
+
+During inference we crop (and optionally mask) each detected instance before
+feeding it through the classifier.  The module exposes a high-level
+:class:`SpeciesIdentifier` class that mirrors
+:class:`~dendrotector.detector.DendroDetector` in spirit: detections go in,
+species predictions with probabilities come out, and all intermediary
+crops/metadata are saved to disk.
+
+The implementation is GPU-ready.  When CUDA is available we default to running
+the classifier in ``float16`` precision, which fits comfortably on modern
+accelerators such as the NVIDIA H100 bundled with this environment.
+"""
 from __future__ import annotations
 
 import json
@@ -14,6 +36,10 @@ from transformers import AutoImageProcessor, AutoModelForImageClassification
 
 from .detector import DetectionResult
 
+# Publicly available Swin Transformer trained for tree species recognition.
+DEFAULT_SPECIES_MODEL_ID = "OttoYu/TreeClassification"
+DEFAULT_BACKGROUND_COLOR = (255, 255, 255)
+
 
 @dataclass
 class SpeciesPrediction:
@@ -24,6 +50,7 @@ class SpeciesPrediction:
     score: float
     top_k: Sequence[tuple[str, float]]
     crop_path: Path
+    model_name: str
 
     def to_json(self) -> dict:
         return {
@@ -34,32 +61,45 @@ class SpeciesPrediction:
                 for candidate_label, candidate_score in self.top_k
             ],
             "crop_path": str(self.crop_path),
+            "model": self.model_name,
             "detection": self.detection.to_json(),
         }
 
 
 class SpeciesIdentifier:
-    """High-quality species identifier built on top of `transformers` models."""
+    """Classify detected instances into tree/shrub species.
+
+    The identifier is purposely opinionated: by default it loads the
+    :data:`~dendrotector.species_identifier.DEFAULT_SPECIES_MODEL_ID` Swin
+    Transformer fine-tuned for tree species recognition.  Users can override the
+    ``model_name_or_path`` argument to experiment with alternative models (for
+    example, broader PlantCLEF checkpoints) while retaining the same
+    preprocessing and batching logic.
+    """
+
+    DEFAULT_MODEL_ID = DEFAULT_SPECIES_MODEL_ID
 
     def __init__(
         self,
-        model_name_or_path: str = "google/vit-huge-patch14-224-in21k",
+        model_name_or_path: str = DEFAULT_SPECIES_MODEL_ID,
         *,
         device: str | None = None,
         trust_remote_code: bool = False,
         top_k: int = 5,
         crop_padding: float = 0.05,
         apply_mask: bool = True,
-        background_color: tuple[int, int, int] = (255, 255, 255),
+        background_color: tuple[int, int, int] = DEFAULT_BACKGROUND_COLOR,
         batch_size: int = 4,
         models_dir: os.PathLike[str] | str | None = None,
+        torch_dtype: torch.dtype | str | None = None,
     ) -> None:
         """Create a new identifier.
 
         Parameters
         ----------
         model_name_or_path:
-            Hugging Face model name or path. Defaults to a high-capacity ViT model.
+            Hugging Face model name or path. Defaults to the
+            ``OttoYu/TreeClassification`` species head.
         device:
             Device identifier. If ``None`` the method automatically selects CUDA when
             available.
@@ -78,6 +118,11 @@ class SpeciesIdentifier:
             RGB color used to fill areas outside the predicted mask.
         batch_size:
             Maximum number of crops to classify at once.
+        models_dir:
+            Optional directory where downloaded model files should be cached.
+        torch_dtype:
+            Preferred :class:`torch.dtype`.  Defaults to ``float16`` on CUDA devices
+            and ``float32`` otherwise.
         """
 
         self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
@@ -85,10 +130,22 @@ class SpeciesIdentifier:
         if self.top_k <= 0:
             raise ValueError("top_k must be positive")
         self.crop_padding = max(float(crop_padding), 0.0)
-        self.apply_mask = apply_mask
+        self.apply_mask = bool(apply_mask)
         self.background_color = np.array(background_color, dtype=np.uint8)
+        if self.background_color.shape != (3,):
+            raise ValueError("background_color must contain exactly three RGB values")
         self.batch_size = max(int(batch_size), 1)
         self._models_dir = Path(models_dir) if models_dir is not None else None
+        self.model_name_or_path = model_name_or_path
+
+        if isinstance(torch_dtype, str):
+            try:
+                torch_dtype = getattr(torch, torch_dtype)
+            except AttributeError as error:
+                raise ValueError(f"Unknown torch dtype alias: {torch_dtype!r}") from error
+        if torch_dtype is None:
+            torch_dtype = torch.float16 if self.device.type == "cuda" else torch.float32
+        self.torch_dtype = torch_dtype
 
         cache_kwargs = self._cache_kwargs("species")
         self._processor = AutoImageProcessor.from_pretrained(
@@ -99,6 +156,7 @@ class SpeciesIdentifier:
         self._model = AutoModelForImageClassification.from_pretrained(
             model_name_or_path,
             trust_remote_code=trust_remote_code,
+            torch_dtype=self.torch_dtype,
             **cache_kwargs,
         )
         self._model.to(self.device)
@@ -258,7 +316,14 @@ class SpeciesIdentifier:
             batch_paths = crop_paths[start:end]
 
             inputs = self._processor(images=list(batch_images), return_tensors="pt")
-            inputs = {key: value.to(self.device) for key, value in inputs.items()}
+            processed_inputs: dict[str, torch.Tensor] = {}
+            for key, value in inputs.items():
+                if torch.is_floating_point(value):
+                    processed_inputs[key] = value.to(self.device, dtype=self.torch_dtype)
+                else:
+                    processed_inputs[key] = value.to(self.device)
+
+            inputs = processed_inputs
 
             with torch.inference_mode():
                 outputs = self._model(**inputs)
@@ -285,6 +350,7 @@ class SpeciesIdentifier:
                     score=float(candidate_scores[0]),
                     top_k=list(zip(candidate_labels, candidate_scores)),
                     crop_path=crop_path,
+                    model_name=self.model_name_or_path,
                 )
                 predictions.append(prediction)
 
