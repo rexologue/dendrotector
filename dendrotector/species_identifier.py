@@ -1,26 +1,4 @@
-"""Species classification for detected trees and shrubs.
-
-The previous placeholder implementation relied on a generic ImageNet model,
-which yielded coarse labels such as ``"oak"`` or ``"pine"`` at best.  This file
-now integrates a pretrained tree-focused classifier published on the Hugging
-Face Hub: :mod:`OttoYu/TreeClassification`.  The model is a fine-tuned
-`Swin Transformer <https://huggingface.co/docs/transformers/model_doc/swin>`_
-that was trained on a curated dataset of subtropical tree and shrub species.
-It predicts 13 classes including *Araucaria columnaris*, *Callistemon
-viminalis*, *Hibiscus tiliaceus*, and other ornamental species commonly found
-in public datasets such as TreeSpecies.
-
-During inference we crop (and optionally mask) each detected instance before
-feeding it through the classifier.  The module exposes a high-level
-:class:`SpeciesIdentifier` class that mirrors
-:class:`~dendrotector.detector.DendroDetector` in spirit: detections go in,
-species predictions with probabilities come out, and all intermediary
-crops/metadata are saved to disk.
-
-The implementation is GPU-ready.  When CUDA is available we default to running
-the classifier in ``float16`` precision, which fits comfortably on modern
-accelerators such as the NVIDIA H100 bundled with this environment.
-"""
+"""Region-aware species classification for the DendroDetector pipeline."""
 from __future__ import annotations
 
 import json
@@ -32,13 +10,21 @@ from typing import List, Sequence
 import numpy as np
 import torch
 from PIL import Image
-from transformers import AutoImageProcessor, AutoModelForImageClassification
+from transformers import CLIPModel, CLIPProcessor
 
 from .detector import DetectionResult
+from .species_config import MOSCOW_REGION_SPECIES, SpeciesDefinition
 
-# Publicly available Swin Transformer trained for tree species recognition.
-DEFAULT_SPECIES_MODEL_ID = "OttoYu/TreeClassification"
+# Default CLIP checkpoint used for zero-shot classification over the curated list
+# of Moscow and temperate-region tree/shrub species.
+DEFAULT_SPECIES_MODEL_ID = "openai/clip-vit-base-patch32"
 DEFAULT_BACKGROUND_COLOR = (255, 255, 255)
+DEFAULT_PROMPT_TEMPLATES = (
+    "a photo of a mature {name} tree",
+    "a photo of the foliage of {name}",
+    "city park planting of {name}",
+    "close-up of the bark of {name}",
+)
 
 
 @dataclass
@@ -51,6 +37,8 @@ class SpeciesPrediction:
     top_k: Sequence[tuple[str, float]]
     crop_path: Path
     model_name: str
+    species_id: str
+    scientific_name: str
 
     def to_json(self) -> dict:
         return {
@@ -62,20 +50,14 @@ class SpeciesPrediction:
             ],
             "crop_path": str(self.crop_path),
             "model": self.model_name,
+            "species_id": self.species_id,
+            "scientific_name": self.scientific_name,
             "detection": self.detection.to_json(),
         }
 
 
 class SpeciesIdentifier:
-    """Classify detected instances into tree/shrub species.
-
-    The identifier is purposely opinionated: by default it loads the
-    :data:`~dendrotector.species_identifier.DEFAULT_SPECIES_MODEL_ID` Swin
-    Transformer fine-tuned for tree species recognition.  Users can override the
-    ``model_name_or_path`` argument to experiment with alternative models (for
-    example, broader PlantCLEF checkpoints) while retaining the same
-    preprocessing and batching logic.
-    """
+    """Classify detected instances into region-specific tree/shrub species."""
 
     DEFAULT_MODEL_ID = DEFAULT_SPECIES_MODEL_ID
 
@@ -84,7 +66,6 @@ class SpeciesIdentifier:
         model_name_or_path: str = DEFAULT_SPECIES_MODEL_ID,
         *,
         device: str | None = None,
-        trust_remote_code: bool = False,
         top_k: int = 5,
         crop_padding: float = 0.05,
         apply_mask: bool = True,
@@ -92,38 +73,10 @@ class SpeciesIdentifier:
         batch_size: int = 4,
         models_dir: os.PathLike[str] | str | None = None,
         torch_dtype: torch.dtype | str | None = None,
+        species_definitions: Sequence[SpeciesDefinition] | None = None,
+        text_prompt_templates: Sequence[str] | None = None,
     ) -> None:
-        """Create a new identifier.
-
-        Parameters
-        ----------
-        model_name_or_path:
-            Hugging Face model name or path. Defaults to the
-            ``OttoYu/TreeClassification`` species head.
-        device:
-            Device identifier. If ``None`` the method automatically selects CUDA when
-            available.
-        trust_remote_code:
-            Whether to trust remote code when loading the model. Some community models
-            require this flag.
-        top_k:
-            Number of highest probability classes to keep per detection.
-        crop_padding:
-            Extra padding added around each detection bounding box before cropping,
-            expressed as a fraction of the box dimensions.
-        apply_mask:
-            If ``True``, the SAM mask is used to remove background pixels from the
-            crop before classification.
-        background_color:
-            RGB color used to fill areas outside the predicted mask.
-        batch_size:
-            Maximum number of crops to classify at once.
-        models_dir:
-            Optional directory where downloaded model files should be cached.
-        torch_dtype:
-            Preferred :class:`torch.dtype`.  Defaults to ``float16`` on CUDA devices
-            and ``float32`` otherwise.
-        """
+        """Create a new species identifier tailored to temperate regions."""
 
         self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
         self.top_k = int(top_k)
@@ -147,23 +100,27 @@ class SpeciesIdentifier:
             torch_dtype = torch.float16 if self.device.type == "cuda" else torch.float32
         self.torch_dtype = torch_dtype
 
+        species = species_definitions or MOSCOW_REGION_SPECIES
+        if not species:
+            raise ValueError("species_definitions must define at least one species")
+        self.species_definitions: tuple[SpeciesDefinition, ...] = tuple(species)
+        self._prompt_templates = tuple(text_prompt_templates or DEFAULT_PROMPT_TEMPLATES)
+
         cache_kwargs = self._cache_kwargs("species")
-        self._processor = AutoImageProcessor.from_pretrained(
+        self._processor = CLIPProcessor.from_pretrained(
             model_name_or_path,
-            trust_remote_code=trust_remote_code,
             **cache_kwargs,
         )
-        self._model = AutoModelForImageClassification.from_pretrained(
+        self._model = CLIPModel.from_pretrained(
             model_name_or_path,
-            trust_remote_code=trust_remote_code,
             torch_dtype=self.torch_dtype,
             **cache_kwargs,
         )
         self._model.to(self.device)
         self._model.eval()
 
-        config = self._model.config
-        self._id2label = {int(idx): label for idx, label in config.id2label.items()}
+        self._species_features = self._build_species_text_features()
+        self._logit_scale = self._model.logit_scale.exp().detach().to(self.device, dtype=self.torch_dtype)
 
     def _cache_kwargs(self, subdir: str) -> dict:
         if self._models_dir is None:
@@ -180,21 +137,7 @@ class SpeciesIdentifier:
         *,
         metadata_filename: str | None = None,
     ) -> List[SpeciesPrediction]:
-        """Identify the species for each detection and persist artifacts.
-
-        Parameters
-        ----------
-        image_path:
-            Path to the source image used to produce the detections.
-        detections:
-            Iterable of :class:`DetectionResult` objects emitted by
-            :meth:`dendrotector.detector.DendroDetector.detect`.
-        output_dir:
-            Directory where cropped instances and metadata will be written.
-        metadata_filename:
-            Optional filename for the JSON metadata file. The default is derived from
-            the input image stem.
-        """
+        """Identify the species for each detection and persist artifacts."""
 
         image_path = Path(image_path)
         output_dir = Path(output_dir)
@@ -323,14 +266,12 @@ class SpeciesIdentifier:
                 else:
                     processed_inputs[key] = value.to(self.device)
 
-            inputs = processed_inputs
-
             with torch.inference_mode():
-                outputs = self._model(**inputs)
-                logits = outputs.logits
-                probabilities = torch.softmax(logits, dim=-1)
+                image_features = self._model.get_image_features(**processed_inputs)
+            image_features = self._normalize(image_features.to(torch.float32))
 
-            probabilities = probabilities.cpu()
+            logits = self._logit_scale * image_features.to(self.torch_dtype) @ self._species_features.T
+            probabilities = torch.softmax(logits.to(torch.float32), dim=-1)
 
             k = min(self.top_k, probabilities.shape[-1])
             top_scores, top_indices = torch.topk(probabilities, k=k, dim=-1)
@@ -342,19 +283,85 @@ class SpeciesIdentifier:
                 top_indices,
             ):
                 candidate_scores = scores.tolist()
-                candidate_indices = indices.tolist()
-                candidate_labels = [self._id2label.get(int(idx), str(idx)) for idx in candidate_indices]
+                candidate_indices = [int(i) for i in indices.tolist()]
+                candidate_labels = [self.species_definitions[idx].common_name for idx in candidate_indices]
+                primary_index = candidate_indices[0]
+                primary_species = self.species_definitions[primary_index]
                 prediction = SpeciesPrediction(
                     detection=det,
-                    label=candidate_labels[0],
+                    label=primary_species.common_name,
                     score=float(candidate_scores[0]),
                     top_k=list(zip(candidate_labels, candidate_scores)),
                     crop_path=crop_path,
                     model_name=self.model_name_or_path,
+                    species_id=primary_species.identifier,
+                    scientific_name=primary_species.scientific_name,
                 )
                 predictions.append(prediction)
 
         return predictions
+
+    def _build_species_text_features(self) -> torch.Tensor:
+        prompts: list[str] = []
+        slices: list[tuple[int, int]] = []
+        for species in self.species_definitions:
+            species_prompts = self._prompts_for_species(species)
+            if not species_prompts:
+                raise ValueError(f"No prompts generated for species '{species.identifier}'")
+            start = len(prompts)
+            prompts.extend(species_prompts)
+            slices.append((start, len(prompts)))
+
+        text_inputs = self._processor(text=prompts, padding=True, return_tensors="pt")
+        text_inputs = {key: value.to(self.device) for key, value in text_inputs.items()}
+
+        with torch.inference_mode():
+            text_features = self._model.get_text_features(**text_inputs)
+        text_features = self._normalize(text_features.to(torch.float32))
+
+        aggregated: list[torch.Tensor] = []
+        for (start, end) in slices:
+            pooled = text_features[start:end].mean(dim=0)
+            pooled = self._normalize(pooled.unsqueeze(0))[0]
+            aggregated.append(pooled)
+
+        stacked = torch.stack(aggregated, dim=0)
+        return stacked.to(self.device, dtype=self.torch_dtype)
+
+    def _prompts_for_species(self, species: SpeciesDefinition) -> list[str]:
+        prompts: list[str] = []
+        seen: set[str] = set()
+
+        for name in species.all_names():
+            for template in self._prompt_templates:
+                prompt = template.format(
+                    name=name,
+                    common_name=species.common_name,
+                    scientific_name=species.scientific_name,
+                ).strip()
+                if not prompt:
+                    continue
+                lower = prompt.lower()
+                if lower in seen:
+                    continue
+                seen.add(lower)
+                prompts.append(prompt)
+
+        for prompt in species.prompts:
+            normalized = prompt.strip()
+            if not normalized:
+                continue
+            lower = normalized.lower()
+            if lower in seen:
+                continue
+            seen.add(lower)
+            prompts.append(normalized)
+
+        return prompts
+
+    @staticmethod
+    def _normalize(tensor: torch.Tensor) -> torch.Tensor:
+        return tensor / tensor.norm(dim=-1, keepdim=True).clamp_min(1e-12)
 
 
 def load_detections(metadata_path: Path | str) -> List[DetectionResult]:
