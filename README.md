@@ -9,7 +9,8 @@ Dendrotector is an instance segmentation pipeline tailored for spotting trees an
 - Export of bounding boxes, masks (with transparency), and a JSON summary for downstream processing.
 - Overlay rendering with bounding boxes and colored masks for quick visual inspection.
 - Optional downstream module that crops each detection and performs species-level
-  classification with high-capacity Hugging Face vision models.
+  classification with a pretrained Swin Transformer fine-tuned on tree and shrub
+  species (``OttoYu/TreeClassification``).
 
 ## Installation
 
@@ -54,6 +55,9 @@ sure to run the command above before invoking `pip install -r requirements.txt`.
 
 ```bash
 python -m dendrotector path/to/image.jpg --output-dir results/
+
+# Run detection and species classification in one go
+python -m dendrotector path/to/image.jpg --output-dir results/ --classify-species
 ```
 
 The command creates the following artifacts inside the chosen output directory:
@@ -76,18 +80,12 @@ To run the detector on a specific device (e.g. CUDA) explicitly, pass `--device 
 ## Programmatic API
 
 ```python
-from dendrotector import (
-    DendroDetector,
-    SpeciesIdentifier,
-)
+from dendrotector import DendroDetector, SpeciesIdentifier
 
 detector = DendroDetector(models_dir="weights")
 detections = detector.detect("forest.jpg", "outputs/forest")
 
-identifier = SpeciesIdentifier(
-    model_name_or_path="google/vit-huge-patch14-224-in21k",
-    batch_size=2,
-)
+identifier = SpeciesIdentifier(batch_size=2)
 species_predictions = identifier.identify("forest.jpg", detections, "outputs/forest")
 
 for prediction in species_predictions:

@@ -5,6 +5,7 @@ import argparse
 from pathlib import Path
 
 from .detector import DendroDetector
+from .species_identifier import SpeciesIdentifier
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -35,6 +36,48 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         help="Directory where model weights should be stored",
     )
+    parser.add_argument(
+        "--classify-species",
+        action="store_true",
+        help=(
+            "After detection, run the pretrained tree species classifier on each "
+            "instance and save the results."
+        ),
+    )
+    parser.add_argument(
+        "--species-model",
+        default=SpeciesIdentifier.DEFAULT_MODEL_ID,
+        help="Hugging Face model to use for species classification.",
+    )
+    parser.add_argument(
+        "--species-device",
+        type=str,
+        default=None,
+        help="Computation device for the species classifier (defaults to detector device).",
+    )
+    parser.add_argument(
+        "--species-top-k",
+        type=int,
+        default=5,
+        help="Number of highest probability species predictions to store per detection.",
+    )
+    parser.add_argument(
+        "--species-crop-padding",
+        type=float,
+        default=0.05,
+        help="Extra padding around each detection when cropping for classification.",
+    )
+    parser.add_argument(
+        "--species-batch-size",
+        type=int,
+        default=4,
+        help="Maximum number of crops to classify simultaneously.",
+    )
+    parser.add_argument(
+        "--species-keep-background",
+        action="store_true",
+        help="Disable SAM mask application and keep the original background in crops.",
+    )
     return parser
 
 
@@ -52,8 +95,29 @@ def main(argv: list[str] | None = None) -> None:
 
     if not results:
         print("No trees or shrubs detected.")
+        return
+
+    print(f"Detected {len(results)} instances. Metadata saved to {args.output_dir}.")
+
+    if not args.classify_species:
+        return
+
+    taxonomy_dir = args.output_dir / "species"
+    identifier = SpeciesIdentifier(
+        model_name_or_path=args.species_model,
+        device=args.species_device or args.device,
+        top_k=args.species_top_k,
+        crop_padding=args.species_crop_padding,
+        apply_mask=not args.species_keep_background,
+        batch_size=args.species_batch_size,
+        models_dir=args.models_dir,
+    )
+    predictions = identifier.identify(args.image, results, taxonomy_dir)
+
+    if not predictions:
+        print("Species identifier did not return any predictions.")
     else:
-        print(f"Detected {len(results)} instances. Metadata saved to {args.output_dir}.")
+        print(f"Classified species for {len(predictions)} instances. Metadata saved to {taxonomy_dir}.")
 
 
 if __name__ == "__main__":

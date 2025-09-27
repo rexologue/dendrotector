@@ -65,7 +65,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--species-model",
-        default="google/vit-huge-patch14-224-in21k",
+        default=SpeciesIdentifier.DEFAULT_MODEL_ID,
         help="Hugging Face model identifier for species classification.",
     )
     parser.add_argument(
