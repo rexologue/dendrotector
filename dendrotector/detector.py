@@ -59,6 +59,21 @@ class DetectionResult:
             "mask_path": str(self.mask_path),
         }
 
+    @classmethod
+    def from_json(cls, payload: dict, base_dir: Path | None = None) -> "DetectionResult":
+        """Recreate a :class:`DetectionResult` from serialized metadata."""
+
+        mask_path = Path(payload["mask_path"])
+        if base_dir is not None and not mask_path.is_absolute():
+            mask_path = base_dir / mask_path
+
+        return cls(
+            label=payload["label"],
+            score=float(payload["score"]),
+            bbox=[int(v) for v in payload["bbox"]],
+            mask_path=mask_path,
+        )
+
 
 class DendroDetector:
     """High-level wrapper around GroundingDINO + SAM 2."""
