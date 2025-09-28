@@ -4,7 +4,8 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from dendrotector import DendroDetector, SpeciesIdentifier
+from dendrotector import DendroDetector
+from dendrotector.detector import DEFAULT_SPECIES_MODEL, PROMPT
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -56,8 +57,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--species-model",
-        default=SpeciesIdentifier.DEFAULT_MODEL_ID,
-        help="Hugging Face model to use for species classification.",
+        default=None,
+        help=(
+            "Optional Hugging Face model identifier for species classification. "
+            "Defaults to rexologue/vit_large_384_for_trees."
+        ),
     )
     parser.add_argument(
         "--species-device",
@@ -87,6 +91,17 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Disable mask application and keep the original background in the crops.",
     )
+    parser.add_argument(
+        "--crop-mode",
+        choices=("bbox", "mask"),
+        default="mask",
+        help="How to compute crops for species classification.",
+    )
+    parser.add_argument(
+        "--report-filename",
+        default=None,
+        help="Optional custom name for the consolidated JSON report.",
+    )
     return parser
 
 
@@ -99,56 +114,41 @@ def main() -> None:
         models_dir=args.models_dir,
     )
 
-    results = detector.detect(
+    species_model = None if args.skip_species else (args.species_model or DEFAULT_SPECIES_MODEL)
+    report = detector.generate_report(
         image_path=args.image,
         output_dir=args.output_dir,
-        prompt=args.prompt,
+        prompt=args.prompt or PROMPT,
         multimask_output=args.multimask_output,
+        crop_mode=args.crop_mode,
+        species_model=species_model,
+        species_device=args.species_device or args.device,
+        species_top_k=args.species_top_k,
+        species_crop_padding=args.species_crop_padding,
+        species_batch_size=args.species_batch_size,
+        species_apply_mask=not args.species_keep_background,
+        report_filename=args.report_filename,
     )
 
-    if not results:
+    if not report.instances:
         print("No trees or shrubs detected.")
         return
 
-    print(f"Saved detection outputs to {args.output_dir.resolve()}")
-    for result in results:
-        print(
-            f"label={result.label!r} score={result.score:.3f} "
-            f"bbox={result.bbox} mask={result.mask_path}"
+    print(f"Detection overlay saved to {report.general.overlay_path}")
+    print(f"Detection metadata saved to {report.general.detection_metadata_path}")
+    if report.report_path is not None:
+        print(f"Consolidated report saved to {report.report_path}")
+
+    for instance in report.instances:
+        summary = (
+            f"instance#{instance.index} type={instance.instance_type} "
+            f"bbox={instance.detection.bbox} score={instance.detection.score:.3f}"
         )
-
-    if args.skip_species:
-        return
-
-    taxonomy_dir = args.output_dir / "species"
-    identifier = SpeciesIdentifier(
-        model_name_or_path=args.species_model,
-        device=args.species_device or args.device,
-        top_k=args.species_top_k,
-        crop_padding=args.species_crop_padding,
-        apply_mask=not args.species_keep_background,
-        batch_size=args.species_batch_size,
-        models_dir=args.models_dir,
-    )
-    predictions = identifier.identify(
-        image_path=args.image,
-        detections=results,
-        output_dir=taxonomy_dir,
-    )
-
-    if not predictions:
-        print("Species identifier did not return any predictions.")
-        return
-
-    print(f"Saved species outputs to {taxonomy_dir.resolve()}")
-    for prediction in predictions:
-        top_k_summary = ", ".join(
-            f"{label} ({score:.3f})" for label, score in prediction.top_k
-        )
-        print(
-            f"crop={prediction.crop_path} label={prediction.label!r} "
-            f"score={prediction.score:.3f} top_k=[{top_k_summary}]"
-        )
+        if instance.species is not None:
+            top1_label = instance.species.label
+            top1_score = instance.species.score
+            summary += f" species={top1_label!r} ({top1_score:.3f})"
+        print(summary)
 
 
 if __name__ == "__main__":

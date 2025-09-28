@@ -4,8 +4,9 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
-from typing import List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence
 
 import cv2
 import numpy as np
@@ -15,7 +16,13 @@ from groundingdino.util.inference import load_image, load_model, predict
 from huggingface_hub import hf_hub_download
 from huggingface_hub.errors import EntryNotFoundError
 from sam2.build_sam import HF_MODEL_ID_TO_FILENAMES, build_sam2
+from PIL import Image
 from sam2.sam2_image_predictor import SAM2ImagePredictor
+
+from .report import DendroReport, GeneralInfo, InstanceReport, SpeciesSummary
+
+if TYPE_CHECKING:  # pragma: no cover - imported for type checking only
+    from .species_identifier import SpeciesPrediction
 
 PROMPT = "tree . shrub . bush ."
 GROUNDING_REPO = "ShilongLiu/GroundingDINO"
@@ -40,6 +47,8 @@ SAM2_MODELS = {
     "vit_l": "facebook/sam2-hiera-base-plus",
     "vit_h": "facebook/sam2-hiera-large",
 }
+
+DEFAULT_SPECIES_MODEL = "rexologue/vit_large_384_for_trees"
 
 
 @dataclass
@@ -75,6 +84,26 @@ class DetectionResult:
         )
 
 
+@dataclass
+class DetectionArtifacts:
+    """Container for detection outputs and associated metadata."""
+
+    image_path: Path
+    image_size: tuple[int, int]
+    overlay_path: Path
+    metadata_path: Path
+    detections: List[DetectionResult]
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "image_path": str(self.image_path),
+            "image_size": list(self.image_size),
+            "overlay_path": str(self.overlay_path),
+            "metadata_path": str(self.metadata_path),
+            "detections": [detection.to_json() for detection in self.detections],
+        }
+
+
 class DendroDetector:
     """High-level wrapper around GroundingDINO + SAM 2."""
 
@@ -92,6 +121,7 @@ class DendroDetector:
         self._models_dir = Path(models_dir) if models_dir is not None else None
 
         self._dino_model = self._load_groundingdino()
+        self._sam_model_name = sam_model
         self._sam_predictor = self._load_sam(sam_model)
 
     def _load_groundingdino(self):
@@ -154,7 +184,7 @@ class DendroDetector:
         *,
         prompt: str = PROMPT,
         multimask_output: bool = False,
-    ) -> List[DetectionResult]:
+    ) -> DetectionArtifacts:
         """Run tree and shrub instance segmentation on an image.
 
         Parameters
@@ -185,7 +215,18 @@ class DendroDetector:
         )
 
         if boxes.shape[0] == 0:
-            return []
+            metadata_path = output_dir / f"{image_path.stem}_detections.json"
+            with metadata_path.open("w", encoding="utf-8") as fp:
+                json.dump([], fp, indent=2)
+            overlay_path = output_dir / f"{image_path.stem}_overlay.png"
+            cv2.imwrite(str(overlay_path), self._draw_overlay(image_source, np.empty((0, 4)), []))
+            return DetectionArtifacts(
+                image_path=image_path,
+                image_size=image_source.shape[:2],
+                overlay_path=overlay_path,
+                metadata_path=metadata_path,
+                detections=[],
+            )
 
         h, w = image_source.shape[:2]
         boxes_xyxy = box_ops.box_cxcywh_to_xyxy(boxes)
@@ -242,7 +283,13 @@ class DendroDetector:
         with metadata_path.open("w", encoding="utf-8") as fp:
             json.dump([r.to_json() for r in results], fp, indent=2)
 
-        return results
+        return DetectionArtifacts(
+            image_path=image_path,
+            image_size=image_source.shape[:2],
+            overlay_path=overlay_path,
+            metadata_path=metadata_path,
+            detections=results,
+        )
 
     @staticmethod
     def _save_mask(mask: np.ndarray, path: Path) -> None:
@@ -285,3 +332,192 @@ class DendroDetector:
             blended = overlay[mask_bool].astype(np.float32) * 0.5 + color * 0.5
             overlay[mask_bool] = blended.astype(np.uint8)
         return overlay
+
+    @staticmethod
+    def _infer_instance_type(label: str) -> str:
+        lowered = label.lower()
+        if any(keyword in lowered for keyword in ("shrub", "bush", "hedge")):
+            return "shrub"
+        return "tree"
+
+    @staticmethod
+    def _load_mask(mask_path: Path, expected_shape: tuple[int, int]) -> np.ndarray | None:
+        try:
+            with Image.open(mask_path) as mask_image:  # type: ignore[name-defined]
+                mask_rgba = mask_image.convert("RGBA")
+                mask_np = np.array(mask_rgba)
+        except FileNotFoundError:
+            return None
+
+        if mask_np.shape[-1] == 4:
+            alpha = mask_np[..., 3] > 0
+        else:
+            alpha = mask_np[..., 0] > 0
+
+        if alpha.shape != expected_shape:
+            mask_rgba = mask_rgba.resize(expected_shape[::-1], Image.NEAREST)  # type: ignore[has-type]
+            mask_np = np.array(mask_rgba)
+            if mask_np.shape[-1] == 4:
+                alpha = mask_np[..., 3] > 0
+            else:
+                alpha = mask_np[..., 0] > 0
+
+        return alpha.astype(bool)
+
+    @staticmethod
+    def _mask_area(mask: np.ndarray | None) -> int | None:
+        if mask is None:
+            return None
+        return int(mask.sum())
+
+    @staticmethod
+    def _lean_angle(mask: np.ndarray | None) -> float | None:
+        if mask is None or not mask.any():
+            return None
+
+        coords = np.column_stack(np.nonzero(mask))
+        if coords.shape[0] < 2:
+            return None
+
+        mean = coords.mean(axis=0)
+        centered = coords - mean
+        cov = np.cov(centered, rowvar=False)
+        eigenvalues, eigenvectors = np.linalg.eigh(cov)
+        principal_vector = eigenvectors[:, np.argmax(eigenvalues)]
+        vertical = np.array([1.0, 0.0])
+        normalized = principal_vector / np.linalg.norm(principal_vector)
+        dot = abs(float(np.dot(normalized, vertical)))
+        dot = np.clip(dot, -1.0, 1.0)
+        angle_rad = float(np.arccos(dot))
+        angle_deg = np.degrees(angle_rad)
+        return angle_deg
+
+    def generate_report(
+        self,
+        image_path: os.PathLike[str] | str,
+        output_dir: os.PathLike[str] | str,
+        *,
+        prompt: str = PROMPT,
+        multimask_output: bool = False,
+        crop_mode: str = "mask",
+        species_model: str | None = DEFAULT_SPECIES_MODEL,
+        species_device: str | None = None,
+        species_top_k: int = 5,
+        species_crop_padding: float = 0.05,
+        species_batch_size: int = 4,
+        species_apply_mask: bool = True,
+        report_filename: str | None = None,
+        extra_general_info: Dict[str, Any] | None = None,
+    ) -> DendroReport:
+        """Run detection, species identification and build a consolidated report."""
+
+        artifacts = self.detect(
+            image_path=image_path,
+            output_dir=output_dir,
+            prompt=prompt,
+            multimask_output=multimask_output,
+        )
+
+        predictions: Sequence["SpeciesPrediction"] = []
+        species_model_name: str | None = None
+        prediction_map: Dict[int, "SpeciesPrediction"] = {}
+        species_output_dir = Path(output_dir) / "species"
+
+        if species_model is not None:
+            from .species_identifier import SpeciesIdentifier  # pylint: disable=import-outside-toplevel
+
+            identifier = SpeciesIdentifier(
+                model_name_or_path=species_model,
+                device=species_device,
+                top_k=species_top_k,
+                crop_padding=species_crop_padding,
+                apply_mask=species_apply_mask,
+                batch_size=species_batch_size,
+                models_dir=self._models_dir,
+            )
+            predictions = identifier.identify(
+                image_path=image_path,
+                detections=artifacts.detections,
+                output_dir=species_output_dir,
+                crop_mode=crop_mode,
+            )
+            species_model_name = identifier.model_name_or_path
+            prediction_map = {prediction.instance_index: prediction for prediction in predictions}
+
+        total_instances = len(artifacts.detections)
+        instances: list[InstanceReport] = []
+        tree_count = 0
+        shrub_count = 0
+        total_mask_area = 0
+
+        for index, detection in enumerate(artifacts.detections):
+            instance_type = self._infer_instance_type(detection.label)
+            if instance_type == "tree":
+                tree_count += 1
+            else:
+                shrub_count += 1
+
+            mask = self._load_mask(detection.mask_path, artifacts.image_size)
+            mask_area = self._mask_area(mask)
+            if mask_area is not None:
+                total_mask_area += mask_area
+            lean_angle = self._lean_angle(mask) if instance_type == "tree" else None
+
+            species_prediction = prediction_map.get(index)
+            species_summary: SpeciesSummary | None = None
+            if species_prediction is not None:
+                species_summary = SpeciesSummary(
+                    label=species_prediction.label,
+                    score=species_prediction.score,
+                    top_k=species_prediction.top_k,
+                    model_name=species_model_name or species_prediction.model_name,
+                    crop_path=species_prediction.crop_path,
+                    crop_size=species_prediction.crop_size,
+                )
+
+            extra: Dict[str, Any] = {
+                "detection_mask_exists": detection.mask_path.exists(),
+            }
+            instances.append(
+                InstanceReport(
+                    index=index,
+                    detection=detection,
+                    instance_type=instance_type,
+                    mask_path=detection.mask_path,
+                    mask_area_px=mask_area,
+                    lean_angle_degrees=lean_angle,
+                    species=species_summary,
+                    extra=extra,
+                )
+            )
+
+        metadata = GeneralInfo(
+            image_path=artifacts.image_path,
+            overlay_path=artifacts.overlay_path,
+            detection_metadata_path=artifacts.metadata_path,
+            detection_model="GroundingDINO",
+            segmentation_model=SAM2_MODELS.get(self._sam_model_name, self._sam_model_name),
+            species_model=species_model_name,
+            prompt=prompt,
+            box_threshold=self.box_threshold,
+            text_threshold=self.text_threshold,
+            generated_at=datetime.utcnow().isoformat(timespec="seconds") + "Z",
+            image_size=artifacts.image_size,
+            crop_mode=crop_mode,
+            total_instances=total_instances,
+            tree_count=tree_count,
+            shrub_count=shrub_count,
+            additional={
+                "multimask_output": multimask_output,
+                "total_mask_area_px": total_mask_area,
+                "species_top_k": species_top_k,
+                "species_crop_padding": species_crop_padding,
+                "species_output_dir": str(species_output_dir) if species_model is not None else None,
+            } | (extra_general_info or {}),
+        )
+
+        report = DendroReport(general=metadata, instances=instances)
+        report_filename = report_filename or f"{Path(image_path).stem}_report.json"
+        report_path = Path(output_dir) / report_filename
+        report.save(report_path)
+        return report
