@@ -5,17 +5,22 @@ import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, Sequence
+from typing import Callable, Literal, Sequence
 
 import numpy as np
+import timm
 import torch
 from PIL import Image
-from transformers import AutoImageProcessor, AutoModelForImageClassification
+from huggingface_hub import hf_hub_download
+from timm.data.constants import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
+from timm.data.transforms_factory import create_transform
 
 from .detector import DetectionResult
 
 DEFAULT_SPECIES_MODEL_ID = "rexologue/vit_large_384_for_trees"
 DEFAULT_BACKGROUND_COLOR = (255, 255, 255)
+TIMM_MODEL_NAME = "vit_large_patch16_384"
+IMAGE_SIZE = 384
 
 
 @dataclass
@@ -76,42 +81,95 @@ class SpeciesIdentifier:
         if self.background_color.shape != (3,):
             raise ValueError("background_color must contain three RGB components")
         self.batch_size = max(int(batch_size), 1)
-        self._models_dir = Path(models_dir) if models_dir is not None else None
+        if models_dir is not None:
+            self._models_root = Path(models_dir)
+        else:
+            self._models_root = Path.home() / ".cache" / "dendrotector" / "models"
+        self._models_root.mkdir(parents=True, exist_ok=True)
 
         if isinstance(torch_dtype, str):
             try:
                 torch_dtype = getattr(torch, torch_dtype)
             except AttributeError as error:
                 raise ValueError(f"Unknown torch dtype alias: {torch_dtype!r}") from error
-        if torch_dtype is None:
-            torch_dtype = torch.float16 if self.device.type == "cuda" else torch.float32
         self.torch_dtype = torch_dtype
 
-        cache_kwargs = self._cache_kwargs("species")
-        self._processor = AutoImageProcessor.from_pretrained(
-            model_name_or_path,
-            **cache_kwargs,
-        )
-        self._model = AutoModelForImageClassification.from_pretrained(
-            model_name_or_path,
-            torch_dtype=self.torch_dtype,
-            **cache_kwargs,
-        )
-        self._model.to(self.device)
-        self._model.eval()
+        self._model_dir = self._prepare_model_dir(model_name_or_path)
+        self._labels, self._model, self._transform = self._load_timm_model(model_name_or_path)
 
-        config = self._model.config
-        if getattr(config, "id2label", None):
-            self._id2label = {int(idx): label for idx, label in config.id2label.items()}
+    def _prepare_model_dir(self, model_name: str) -> Path:
+        safe_name = self._sanitize_name(model_name)
+        target = self._models_root / "species" / safe_name
+        target.mkdir(parents=True, exist_ok=True)
+        return target
+
+    @staticmethod
+    def _sanitize_name(model_name: str) -> str:
+        return "".join(
+            ch if ch.isalnum() or ch in ("-", "_", ".") else "_"
+            for ch in model_name
+        )
+
+    def _load_timm_model(
+        self, model_name_or_path: str
+    ) -> tuple[list[str], torch.nn.Module, Callable[[Image.Image], torch.Tensor]]:
+        model_path = Path(model_name_or_path)
+        if model_path.is_dir():
+            base_dir = model_path
         else:
-            self._id2label = {idx: str(idx) for idx in range(config.num_labels)}
+            base_dir = self._model_dir
 
-    def _cache_kwargs(self, subdir: str) -> dict:
-        if self._models_dir is None:
-            return {}
-        target_dir = self._models_dir / subdir
-        target_dir.mkdir(parents=True, exist_ok=True)
-        return {"cache_dir": str(target_dir)}
+        labels_path = self._ensure_file(model_name_or_path, base_dir, "labels.json")
+        with labels_path.open("r", encoding="utf-8") as fp:
+            labels_payload = json.load(fp)
+        if isinstance(labels_payload, dict):
+            labels = [labels_payload[str(i)] for i in range(len(labels_payload))]
+        else:
+            labels = list(labels_payload)
+        if not labels:
+            raise ValueError("labels.json did not contain any labels")
+
+        weights_path = self._ensure_file(model_name_or_path, base_dir, "pytorch_model.bin")
+        state = torch.load(weights_path, map_location="cpu")
+        if any(key.startswith("module.") for key in state):
+            state = {key.replace("module.", "", 1): value for key, value in state.items()}
+
+        model = timm.create_model(TIMM_MODEL_NAME, num_classes=len(labels), pretrained=False)
+        model.load_state_dict(state, strict=True)
+        model.to(self.device)
+        if self.torch_dtype is not None:
+            model.to(dtype=self.torch_dtype)
+        model.eval()
+
+        transform = create_transform(
+            input_size=(3, IMAGE_SIZE, IMAGE_SIZE),
+            interpolation="bicubic",
+            mean=IMAGENET_DEFAULT_MEAN,
+            std=IMAGENET_DEFAULT_STD,
+            is_training=False,
+        )
+
+        return labels, model, transform
+
+    def _ensure_file(self, model_name_or_path: str, base_dir: Path, filename: str) -> Path:
+        candidate = base_dir / filename
+        if candidate.exists():
+            return candidate
+        model_path = Path(model_name_or_path)
+        if model_path.is_dir():
+            raise FileNotFoundError(candidate)
+        downloaded = hf_hub_download(
+            repo_id=model_name_or_path,
+            filename=filename,
+            local_dir=str(base_dir),
+        )
+        return Path(downloaded)
+
+    @staticmethod
+    def _ensure_pil(image: Image.Image | np.ndarray) -> Image.Image:
+        if isinstance(image, Image.Image):
+            return image
+        return Image.fromarray(np.asarray(image))
 
     def identify(
         self,
@@ -235,54 +293,52 @@ class SpeciesIdentifier:
         crop_mode: str,
     ) -> list[SpeciesPrediction]:
         predictions: list[SpeciesPrediction] = []
-
         for start in range(0, len(crops), self.batch_size):
             end = min(start + self.batch_size, len(crops))
-            batch_images = list(crops[start:end])
-            batch_detections = detections[start:end]
-            batch_paths = crop_paths[start:end]
-            batch_sizes = crop_sizes[start:end]
-            batch_indices = indices[start:end]
+            batch_images = crops[start:end]
+            tensors = [self._transform(self._ensure_pil(image)) for image in batch_images]
+            batch_tensor = torch.stack(tensors, dim=0)
+            batch_tensor = batch_tensor.to(self.device)
+            if self.torch_dtype is not None:
+                batch_tensor = batch_tensor.to(self.torch_dtype)
 
-            inputs = self._processor(images=batch_images, return_tensors="pt")
-            processed_inputs: dict[str, torch.Tensor] = {}
-            for key, value in inputs.items():
-                if torch.is_floating_point(value):
-                    processed_inputs[key] = value.to(self.device, dtype=self.torch_dtype)
-                else:
-                    processed_inputs[key] = value.to(self.device)
+            with torch.no_grad():
+                logits = self._model(batch_tensor)
 
-            with torch.inference_mode():
-                outputs = self._model(**processed_inputs)
-            logits = outputs.logits.to(torch.float32)
-            probabilities = torch.softmax(logits, dim=-1)
+            probabilities = torch.softmax(logits, dim=1).cpu()
+            k = min(self.top_k, probabilities.shape[1])
+            top_scores, top_indices = torch.topk(probabilities, k=k, dim=1)
 
-            k = min(self.top_k, probabilities.shape[-1])
-            top_scores, top_indices = torch.topk(probabilities, k=k, dim=-1)
+            for offset in range(end - start):
+                absolute_index = start + offset
+                det = detections[absolute_index]
+                crop_path = crop_paths[absolute_index]
+                crop_size = crop_sizes[absolute_index]
+                instance_index = indices[absolute_index]
 
-            for det, crop_path, crop_size, scores, indices_row, instance_index in zip(
-                batch_detections,
-                batch_paths,
-                batch_sizes,
-                top_scores,
-                top_indices,
-                batch_indices,
-            ):
-                candidate_scores = scores.tolist()
-                candidate_indices = [int(i) for i in indices_row.tolist()]
-                candidate_labels = [self._id2label[idx] for idx in candidate_indices]
-                prediction = SpeciesPrediction(
-                    detection=det,
-                    instance_index=instance_index,
-                    label=candidate_labels[0],
-                    score=float(candidate_scores[0]),
-                    top_k=list(zip(candidate_labels, candidate_scores)),
-                    crop_path=crop_path,
-                    crop_size=crop_size,
-                    model_name=self.model_name_or_path,
-                    crop_mode=crop_mode,
+                candidate_scores = top_scores[offset].tolist()
+                candidate_indices = [int(i) for i in top_indices[offset].tolist()]
+                candidate_labels = [self._labels[idx] for idx in candidate_indices]
+
+                top_k_pairs = [
+                    (label, float(score))
+                    for label, score in zip(candidate_labels, candidate_scores)
+                ]
+                label, score = top_k_pairs[0]
+
+                predictions.append(
+                    SpeciesPrediction(
+                        detection=det,
+                        instance_index=instance_index,
+                        label=label,
+                        score=score,
+                        top_k=top_k_pairs,
+                        crop_path=crop_path,
+                        crop_size=crop_size,
+                        model_name=self.model_name_or_path,
+                        crop_mode=crop_mode,
+                    )
                 )
-                predictions.append(prediction)
 
         return predictions
 
