@@ -4,7 +4,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from .detector import DendroDetector
+from .detector import DendroDetector, PROMPT
 from .species_identifier import SpeciesIdentifier
 
 
@@ -19,6 +19,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--box-threshold", type=float, default=0.3, help="GroundingDINO box threshold")
     parser.add_argument("--text-threshold", type=float, default=0.25, help="GroundingDINO text threshold")
+    parser.add_argument("--prompt", default=PROMPT, help="Text prompt provided to GroundingDINO.")
     parser.add_argument(
         "--multimask",
         action="store_true",
@@ -35,14 +36,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help="Directory where model weights should be stored",
-    )
-    parser.add_argument(
-        "--classify-species",
-        action="store_true",
-        help=(
-            "After detection, run the pretrained tree species classifier on each "
-            "instance and save the results."
-        ),
     )
     parser.add_argument(
         "--species-model",
@@ -78,6 +71,22 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Disable SAM mask application and keep the original background in crops.",
     )
+    parser.add_argument(
+        "--crop-mode",
+        choices=("bbox", "mask"),
+        default="mask",
+        help="How to derive the crop region before classification.",
+    )
+    parser.add_argument(
+        "--skip-species",
+        action="store_true",
+        help="Skip the species classification stage and only run detection.",
+    )
+    parser.add_argument(
+        "--report-filename",
+        default=None,
+        help="Optional custom filename for the generated JSON report.",
+    )
     return parser
 
 
@@ -91,33 +100,35 @@ def main(argv: list[str] | None = None) -> None:
         text_threshold=args.text_threshold,
         models_dir=args.models_dir,
     )
-    results = detector.detect(args.image, args.output_dir, multimask_output=args.multimask)
+    species_model = None if args.skip_species else args.species_model
 
-    if not results:
+    report = detector.generate_report(
+        image_path=args.image,
+        output_dir=args.output_dir,
+        prompt=args.prompt,
+        multimask_output=args.multimask,
+        crop_mode=args.crop_mode,
+        species_model=species_model,
+        species_device=args.species_device or args.device,
+        species_top_k=args.species_top_k,
+        species_crop_padding=args.species_crop_padding,
+        species_batch_size=args.species_batch_size,
+        species_apply_mask=not args.species_keep_background,
+        report_filename=args.report_filename,
+    )
+
+    if not report.instances:
         print("No trees or shrubs detected.")
         return
 
-    print(f"Detected {len(results)} instances. Metadata saved to {args.output_dir}.")
+    print(f"Saved overlay to {report.general.overlay_path}")
+    print(f"Saved detection metadata to {report.general.detection_metadata_path}")
+    if report.report_path is not None:
+        print(f"Saved consolidated report to {report.report_path}")
 
-    if not args.classify_species:
-        return
-
-    taxonomy_dir = args.output_dir / "species"
-    identifier = SpeciesIdentifier(
-        model_name_or_path=args.species_model,
-        device=args.species_device or args.device,
-        top_k=args.species_top_k,
-        crop_padding=args.species_crop_padding,
-        apply_mask=not args.species_keep_background,
-        batch_size=args.species_batch_size,
-        models_dir=args.models_dir,
-    )
-    predictions = identifier.identify(args.image, results, taxonomy_dir)
-
-    if not predictions:
-        print("Species identifier did not return any predictions.")
-    else:
-        print(f"Classified species for {len(predictions)} instances. Metadata saved to {taxonomy_dir}.")
+    if species_model is not None:
+        classified = sum(1 for instance in report.instances if instance.species is not None)
+        print(f"Classified species for {classified} instances using {report.general.species_model}.")
 
 
 if __name__ == "__main__":
