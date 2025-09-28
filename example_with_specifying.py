@@ -136,7 +136,6 @@ def main() -> None:
         apply_mask=not args.species_no_mask,
         batch_size=args.species_batch_size,
         models_dir=args.species_models_dir or args.models_dir,
-        trust_remote_code=args.species_trust_remote_code,
     )
 
     species_predictions = species_identifier.identify(
