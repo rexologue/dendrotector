@@ -1,107 +1,33 @@
-"""Instance segmentation pipeline for detecting trees and shrubs."""
 from __future__ import annotations
 
-import json
 import os
-from dataclasses import dataclass
-from datetime import datetime
+import json
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence
+from typing import List, Optional
 
 import cv2
-import numpy as np
 import torch
+import numpy as np
+from PIL import Image
+
 from groundingdino.util import box_ops
 from groundingdino.util.inference import load_image, load_model, predict
+
 from huggingface_hub import hf_hub_download
-from huggingface_hub.errors import EntryNotFoundError
-from sam2.build_sam import HF_MODEL_ID_TO_FILENAMES, build_sam2
-from PIL import Image
+
 from sam2.sam2_image_predictor import SAM2ImagePredictor
+from sam2.build_sam import HF_MODEL_ID_TO_FILENAMES, build_sam2
 
-from .report import DendroReport, GeneralInfo, InstanceReport, SpeciesSummary
-
-if TYPE_CHECKING:  # pragma: no cover - imported for type checking only
-    from .species_identifier import SpeciesPrediction
+from species_identifier import SpeciesIdentifier
 
 PROMPT = "tree . shrub . bush ."
-GROUNDING_REPO = "ShilongLiu/GroundingDINO"
-GROUNDING_CONFIG_CANDIDATES = (
-    "GroundingDINO_SwinT_OGC.cfg.py",
-    "GroundingDINO_SwinT_OGC.py",
-)
+
+# Grounding DINO constants
+GROUNDING_REPO    = "ShilongLiu/GroundingDINO"
 GROUNDING_WEIGHTS = "groundingdino_swint_ogc.pth"
-# Mapping derived from the repositories published at
-# https://huggingface.co/facebook for the SAM 2 checkpoints.
-SAM2_MODELS = {
-    "hiera_t": "facebook/sam2-hiera-tiny",
-    "hiera_s": "facebook/sam2-hiera-small",
-    "hiera_b+": "facebook/sam2-hiera-base-plus",
-    "hiera_l": "facebook/sam2-hiera-large",
-    "hiera_t_2.1": "facebook/sam2.1-hiera-tiny",
-    "hiera_s_2.1": "facebook/sam2.1-hiera-small",
-    "hiera_b+_2.1": "facebook/sam2.1-hiera-base-plus",
-    "hiera_l_2.1": "facebook/sam2.1-hiera-large",
-    # Legacy aliases preserved for backwards compatibility with previous SAM models.
-    "vit_b": "facebook/sam2-hiera-small",
-    "vit_l": "facebook/sam2-hiera-base-plus",
-    "vit_h": "facebook/sam2-hiera-large",
-}
+GROUNDING_CONFIG  = "GroundingDINO_SwinT_OGC.cfg.py"
 
-DEFAULT_SPECIES_MODEL = "rexologue/vit_large_384_for_trees"
-
-
-@dataclass
-class DetectionResult:
-    """Holds the result of a single detection."""
-
-    label: str
-    score: float
-    bbox: List[int]
-    mask_path: Path
-
-    def to_json(self) -> dict:
-        return {
-            "label": self.label,
-            "score": float(self.score),
-            "bbox": self.bbox,
-            "mask_path": str(self.mask_path),
-        }
-
-    @classmethod
-    def from_json(cls, payload: dict, base_dir: Path | None = None) -> "DetectionResult":
-        """Recreate a :class:`DetectionResult` from serialized metadata."""
-
-        mask_path = Path(payload["mask_path"])
-        if base_dir is not None and not mask_path.is_absolute():
-            mask_path = base_dir / mask_path
-
-        return cls(
-            label=payload["label"],
-            score=float(payload["score"]),
-            bbox=[int(v) for v in payload["bbox"]],
-            mask_path=mask_path,
-        )
-
-
-@dataclass
-class DetectionArtifacts:
-    """Container for detection outputs and associated metadata."""
-
-    image_path: Path
-    image_size: tuple[int, int]
-    overlay_path: Path
-    metadata_path: Path
-    detections: List[DetectionResult]
-
-    def to_json(self) -> dict[str, Any]:
-        return {
-            "image_path": str(self.image_path),
-            "image_size": list(self.image_size),
-            "overlay_path": str(self.overlay_path),
-            "metadata_path": str(self.metadata_path),
-            "detections": [detection.to_json() for detection in self.detections],
-        }
+SAM2_REPO = "facebook/sam2-hiera-large"
 
 
 class DendroDetector:
@@ -110,100 +36,82 @@ class DendroDetector:
     def __init__(
         self,
         device: Optional[str] = None,
-        sam_model: str = "vit_h",
         box_threshold: float = 0.3,
         text_threshold: float = 0.25,
-        models_dir: os.PathLike[str] | str | None = None,
+        models_dir: Path = Path("~/.dendrocache"),
     ) -> None:
+        
         self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
         self.box_threshold = box_threshold
         self.text_threshold = text_threshold
-        self._models_dir = Path(models_dir) if models_dir is not None else None
+
+        self._models_dir = Path(models_dir).expanduser().resolve()
+        self._models_dir.mkdir(parents=True, exist_ok=True)
 
         self._dino_model = self._load_groundingdino()
-        self._sam_model_name = sam_model
-        self._sam_predictor = self._load_sam(sam_model)
+        self._sam_predictor = self._load_sam2()
+        self._species_identifier = SpeciesIdentifier(self.device, self._models_dir) # type: ignore
+
+    ################
+    # LOAD METHODS #
+    ################
 
     def _load_groundingdino(self):
-        download_kwargs = self._download_kwargs("groundingdino")
-        config_path = self._download_groundingdino_config(download_kwargs)
-        weights_path = hf_hub_download(GROUNDING_REPO, GROUNDING_WEIGHTS, **download_kwargs)
-        model = load_model(config_path, weights_path)
+        groundingdino_dir = self._models_dir / "groundingdino"
+        groundingdino_dir.mkdir(parents=True, exist_ok=True)
+
+        config_path = hf_hub_download(GROUNDING_REPO, GROUNDING_CONFIG, local_dir=groundingdino_dir)
+        weights_path = hf_hub_download(GROUNDING_REPO, GROUNDING_WEIGHTS, local_dir=groundingdino_dir)
+
+        model = load_model(str(config_path), str(weights_path))
+
         model.to(self.device)
         model.eval()
+
         return model
 
-    def _download_groundingdino_config(self, download_kwargs: dict) -> str:
-        last_error: EntryNotFoundError | None = None
-        for filename in GROUNDING_CONFIG_CANDIDATES:
-            try:
-                return hf_hub_download(GROUNDING_REPO, filename, **download_kwargs)
-            except EntryNotFoundError as error:
-                last_error = error
-        if last_error is not None:
-            raise last_error
-        raise RuntimeError("No GroundingDINO config candidates configured")
+    def _load_sam2(self) -> SAM2ImagePredictor:
+        sam2_dir = self._models_dir / "sam2"
+        sam2_dir.mkdir(parents=True, exist_ok=True)
 
-    def _load_sam(self, sam_model: str) -> SAM2ImagePredictor:
-        download_kwargs = self._download_kwargs("sam2")
+        config_name, checkpoint_name = HF_MODEL_ID_TO_FILENAMES[SAM2_REPO]
+        ckpt_path   = hf_hub_download(SAM2_REPO, filename=checkpoint_name, local_dir=sam2_dir)
 
-        try:
-            repo_id = SAM2_MODELS[sam_model]
-        except KeyError as error:
-            known_models = ", ".join(sorted(SAM2_MODELS))
-            raise ValueError(
-                f"Unsupported SAM2 model '{sam_model}'. Known models: {known_models}."
-            ) from error
-
-        try:
-            config_name, checkpoint_name = HF_MODEL_ID_TO_FILENAMES[repo_id]
-        except KeyError as error:
-            raise ValueError(
-                f"No configuration mapping found for SAM2 repository '{repo_id}'."
-            ) from error
-
-        checkpoint_path = hf_hub_download(repo_id, checkpoint_name, **download_kwargs)
         sam_model_instance = build_sam2(
-            config_file=config_name,
-            ckpt_path=checkpoint_path,
-            device=self.device,
+            config_file=config_name,      
+            ckpt_path=str(ckpt_path),
+            device=str(self.device),      
         )
-        return SAM2ImagePredictor(sam_model_instance)
 
-    def _download_kwargs(self, subdir: str) -> dict:
-        if self._models_dir is None:
-            return {}
-        target_dir = self._models_dir / subdir
-        target_dir.mkdir(parents=True, exist_ok=True)
-        return {"local_dir": str(target_dir), "local_dir_use_symlinks": False}
+        return SAM2ImagePredictor(sam_model_instance)
+    
+    #############
+    # BASIC API #
+    #############
 
     def detect(
         self,
         image_path: os.PathLike[str] | str,
         output_dir: os.PathLike[str] | str,
+        top_k: int,
         *,
         prompt: str = PROMPT,
         multimask_output: bool = False,
-    ) -> DetectionArtifacts:
-        """Run tree and shrub instance segmentation on an image.
-
-        Parameters
-        ----------
-        image_path:
-            Path to the input image.
-        output_dir:
-            Directory where mask artifacts and metadata will be written.
-        prompt:
-            Text prompt for GroundingDINO. Defaults to a tree-focused prompt.
-        multimask_output:
-            If True, SAM 2 will return up to three mask proposals per box; the
-            best scoring mask is selected otherwise.
+    ) -> List[Path]:
         """
-
-        image_path = Path(image_path)
-        output_dir = Path(output_dir)
+        Запуск детекции деревьев/кустарников. Для КАЖДОГО instance создаётся
+        отдельная папка в output_dir со следующими файлами:
+        - overlay.png  (исходное изображение + маска и bbox данного instance)
+        - mask.png     (только маска, RGBA -> сохраняется как BGRA для OpenCV)
+        - bbox.png     (кроп по bbox)
+        - report.json  (type: tree/shrub, score, bbox, lean_angle, species)
+        Возвращает список путей к созданным папкам instance.
+        """
+        image_path = Path(image_path).expanduser().resolve()
+        output_dir = Path(output_dir).expanduser().resolve()
         output_dir.mkdir(parents=True, exist_ok=True)
 
+        # 1) Детекция боксами GroundingDINO
         image_source, image_tensor = load_image(str(image_path))
         boxes, logits, phrases = predict(
             model=self._dino_model,
@@ -211,94 +119,127 @@ class DendroDetector:
             caption=prompt,
             box_threshold=self.box_threshold,
             text_threshold=self.text_threshold,
-            device=self.device,
+            device=self.device,  # type: ignore
         )
 
+        # Если ничего не нашли — ничего не пишем
         if boxes.shape[0] == 0:
-            metadata_path = output_dir / f"{image_path.stem}_detections.json"
-            with metadata_path.open("w", encoding="utf-8") as fp:
-                json.dump([], fp, indent=2)
-            overlay_path = output_dir / f"{image_path.stem}_overlay.png"
-            cv2.imwrite(str(overlay_path), self._draw_overlay(image_source, np.empty((0, 4)), []))
-            return DetectionArtifacts(
-                image_path=image_path,
-                image_size=image_source.shape[:2],
-                overlay_path=overlay_path,
-                metadata_path=metadata_path,
-                detections=[],
-            )
+            return []
 
+        # Приводим боксы к XYXY в пикселях
         h, w = image_source.shape[:2]
         boxes_xyxy = box_ops.box_cxcywh_to_xyxy(boxes)
         boxes_xyxy *= torch.tensor([w, h, w, h], device=boxes_xyxy.device)
-        boxes_xyxy = boxes_xyxy.cpu()
+        boxes_xyxy = boxes_xyxy.cpu().numpy()
+        logits = logits.sigmoid().cpu().numpy()
 
+        # 2) Маски SAM 2: получаем лучшую маску для каждого бокса
         self._sam_predictor.set_image(image_source)
 
-        mask_candidates: list[np.ndarray] = []
-        iou_candidates: list[np.ndarray] = []
-        for box in boxes_xyxy.numpy():
+        items: list[tuple[float, np.ndarray, np.ndarray, np.ndarray, str]] = []
+        # (area_ratio, box_xyxy, mask_bool, logit_vec, phrase)
+
+        for box_xyxy, logit_vec, phrase in zip(boxes_xyxy, logits, phrases):
             masks_np, iou_predictions_np, _ = self._sam_predictor.predict(
-                box=box,
+                box=box_xyxy,
                 multimask_output=multimask_output,
                 normalize_coords=True,
             )
-            mask_candidates.append(masks_np)
-            iou_candidates.append(iou_predictions_np)
+            # Выбор лучшей маски по IoU с подсказкой SAM2 (или первая)
+            if multimask_output and masks_np.shape[0] > 1:
+                best_idx = int(np.argmax(iou_predictions_np))
+                best_mask = masks_np[best_idx]
+            else:
+                best_mask = masks_np[0]
 
-        boxes_xyxy = boxes_xyxy.numpy()
-        logits = logits.sigmoid().cpu().numpy()
+            mask_bool = best_mask.astype(bool)
+            area = int(mask_bool.sum())
+            area_ratio = area / float(h * w) if h > 0 and w > 0 else 0.0
+            items.append((area_ratio, box_xyxy, mask_bool, logit_vec, phrase))
 
-        overlay = self._draw_overlay(image_source, boxes_xyxy, mask_candidates)
-        overlay_path = output_dir / f"{image_path.stem}_overlay.png"
-        cv2.imwrite(str(overlay_path), overlay)
+        # 3) Сортируем инстансы по убыванию доли площади маски (крупные — первыми)
+        items.sort(key=lambda t: t[0], reverse=True)
 
-        results: List[DetectionResult] = []
-        for idx, (box, mask_set, iou_set, logit, phrase) in enumerate(
-            zip(boxes_xyxy, mask_candidates, iou_candidates, logits, phrases)
-        ):
-            best_mask = mask_set[0]
-            if multimask_output and mask_set.shape[0] > 1:
-                best_idx = int(np.argmax(iou_set))
-                best_mask = mask_set[best_idx]
+        created_instance_dirs: List[Path] = []
 
-            mask_binary = best_mask.astype(bool)
-            mask_path = output_dir / f"{image_path.stem}_instance_{idx:02d}.png"
-            self._save_mask(mask_binary, mask_path)
+        # 4) Сохраняем артефакты для каждого инстанса
+        for idx, (area_ratio, box_xyxy, mask_bool, logit_vec, phrase) in enumerate(items):
+            # --- безопасный клэмп координат ---
+            # Клэмп под кроп (эксклюзивный правый/нижний край) — минимум 1px по каждой оси
+            x0_c = max(0, min(int(round(box_xyxy[0])), w - 1))
+            y0_c = max(0, min(int(round(box_xyxy[1])), h - 1))
+            x1_c = max(x0_c + 1, min(int(round(box_xyxy[2])), w))   # allow == w для слайсинга
+            y1_c = max(y0_c + 1, min(int(round(box_xyxy[3])), h))   # allow == h для слайсинга
 
-            bbox = [int(round(v)) for v in box.tolist()]
-            label = phrase.strip() or "tree"
-            score = float(np.max(logit))
+            # Клэмп под рисование рамки (инклюзивный правый/нижний край)
+            x1_d = min(x1_c - 1, w - 1)
+            y1_d = min(y1_c - 1, h - 1)
 
-            results.append(
-                DetectionResult(
-                    label=label,
-                    score=score,
-                    bbox=bbox,
-                    mask_path=mask_path,
-                )
+            # Директория instance (строго по ТЗ, без stem)
+            instance_dir = output_dir / f"instance_{idx:02d}"
+            instance_dir.mkdir(parents=True, exist_ok=True)
+
+            # overlay.png — один бокс/маска поверх оригинала
+            overlay_bgr = self._draw_overlay(
+                image_source,
+                np.asarray([[x0_c, y0_c, x1_d, y1_d]], dtype=np.float32),
+                [mask_bool.astype(np.uint8)],
             )
+            cv2.imwrite(str(instance_dir / "overlay.png"), overlay_bgr)
 
-        metadata_path = output_dir / f"{image_path.stem}_detections.json"
-        with metadata_path.open("w", encoding="utf-8") as fp:
-            json.dump([r.to_json() for r in results], fp, indent=2)
+            # mask.png — RGBA (внутри _save_mask делается RGBA->BGRA для OpenCV)
+            self._save_mask(mask_bool, instance_dir / "mask.png")
 
-        return DetectionArtifacts(
-            image_path=image_path,
-            image_size=image_source.shape[:2],
-            overlay_path=overlay_path,
-            metadata_path=metadata_path,
-            detections=results,
-        )
+            # bbox.png — кроп (эксклюзивные границы)
+            crop_rgb = image_source[y0_c:y1_c, x0_c:x1_c]
+            if crop_rgb.size == 0:
+                # На случай вырожденных границ
+                crop_rgb = image_source[max(0, y0_c):max(0, y0_c + 1), max(0, x0_c):max(0, x0_c + 1)]
+            crop_bgr = cv2.cvtColor(crop_rgb, cv2.COLOR_RGB2BGR)
+            bbox_path = instance_dir / "bbox.png"
+            cv2.imwrite(str(bbox_path), crop_bgr)
+
+            # report.json — метаданные
+            label = (phrase or "").strip() or "tree"
+            instance_type = self._infer_instance_type(label)
+            angle_deg = self._lean_angle(mask_bool)
+
+            species, k = self._species_identifier.identify(bbox_path, top_k)
+
+            report = {
+                "type": instance_type,                           # "tree" | "shrub"
+                "score": float(np.max(logit_vec)),               # уверенность DINO по этому боксу
+                "bbox": [int(x0_c), int(y0_c), int(x1_c), int(y1_c)],
+                "lean_angle": None if angle_deg is None else float(angle_deg),
+                "top_k": k,                                      # фактический k после капа
+                "species": species[0]["label"],
+                "species_score": species[0]["prob"],
+                "top_k_species": species
+            }
+            with (instance_dir / "report.json").open("w", encoding="utf-8") as fp:
+                json.dump(report, fp, ensure_ascii=False, indent=2)
+
+            created_instance_dirs.append(instance_dir)
+
+        return created_instance_dirs
+
+    
+    ###########
+    # HELPERS #
+    ###########
 
     @staticmethod
     def _save_mask(mask: np.ndarray, path: Path) -> None:
+        # Build RGBA logically (R, G, B, A)
         rgba = np.zeros((*mask.shape, 4), dtype=np.uint8)
-        rgba[..., 0] = 34
-        rgba[..., 1] = 139
-        rgba[..., 2] = 34
-        rgba[..., 3] = np.where(mask, 200, 0)
-        cv2.imwrite(str(path), rgba)
+        rgba[..., 0] = 34   # R
+        rgba[..., 1] = 139  # G
+        rgba[..., 2] = 34   # B
+        rgba[..., 3] = np.where(mask, 200, 0)  # A
+
+        # OpenCV expects BGRA
+        bgra = rgba[..., [2, 1, 0, 3]]  # swap R<->B
+        cv2.imwrite(str(path), bgra)
 
     @staticmethod
     def _draw_overlay(
@@ -390,134 +331,5 @@ class DendroDetector:
         dot = np.clip(dot, -1.0, 1.0)
         angle_rad = float(np.arccos(dot))
         angle_deg = np.degrees(angle_rad)
+
         return angle_deg
-
-    def generate_report(
-        self,
-        image_path: os.PathLike[str] | str,
-        output_dir: os.PathLike[str] | str,
-        *,
-        prompt: str = PROMPT,
-        multimask_output: bool = False,
-        crop_mode: str = "mask",
-        species_model: str | None = DEFAULT_SPECIES_MODEL,
-        species_device: str | None = None,
-        species_top_k: int = 5,
-        species_crop_padding: float = 0.05,
-        species_batch_size: int = 4,
-        species_apply_mask: bool = True,
-        report_filename: str | None = None,
-        extra_general_info: Dict[str, Any] | None = None,
-    ) -> DendroReport:
-        """Run detection, species identification and build a consolidated report."""
-
-        artifacts = self.detect(
-            image_path=image_path,
-            output_dir=output_dir,
-            prompt=prompt,
-            multimask_output=multimask_output,
-        )
-
-        predictions: Sequence["SpeciesPrediction"] = []
-        species_model_name: str | None = None
-        prediction_map: Dict[int, "SpeciesPrediction"] = {}
-        species_output_dir = Path(output_dir) / "species"
-
-        if species_model is not None:
-            from .species_identifier import SpeciesIdentifier  # pylint: disable=import-outside-toplevel
-
-            identifier = SpeciesIdentifier(
-                model_name_or_path=species_model,
-                device=species_device,
-                top_k=species_top_k,
-                crop_padding=species_crop_padding,
-                apply_mask=species_apply_mask,
-                batch_size=species_batch_size,
-                models_dir=self._models_dir,
-            )
-            predictions = identifier.identify(
-                image_path=image_path,
-                detections=artifacts.detections,
-                output_dir=species_output_dir,
-                crop_mode=crop_mode,
-            )
-            species_model_name = identifier.model_name_or_path
-            prediction_map = {prediction.instance_index: prediction for prediction in predictions}
-
-        total_instances = len(artifacts.detections)
-        instances: list[InstanceReport] = []
-        tree_count = 0
-        shrub_count = 0
-        total_mask_area = 0
-
-        for index, detection in enumerate(artifacts.detections):
-            instance_type = self._infer_instance_type(detection.label)
-            if instance_type == "tree":
-                tree_count += 1
-            else:
-                shrub_count += 1
-
-            mask = self._load_mask(detection.mask_path, artifacts.image_size)
-            mask_area = self._mask_area(mask)
-            if mask_area is not None:
-                total_mask_area += mask_area
-            lean_angle = self._lean_angle(mask) if instance_type == "tree" else None
-
-            species_prediction = prediction_map.get(index)
-            species_summary: SpeciesSummary | None = None
-            if species_prediction is not None:
-                species_summary = SpeciesSummary(
-                    label=species_prediction.label,
-                    score=species_prediction.score,
-                    top_k=species_prediction.top_k,
-                    model_name=species_model_name or species_prediction.model_name,
-                    crop_path=species_prediction.crop_path,
-                    crop_size=species_prediction.crop_size,
-                )
-
-            extra: Dict[str, Any] = {
-                "detection_mask_exists": detection.mask_path.exists(),
-            }
-            instances.append(
-                InstanceReport(
-                    index=index,
-                    detection=detection,
-                    instance_type=instance_type,
-                    mask_path=detection.mask_path,
-                    mask_area_px=mask_area,
-                    lean_angle_degrees=lean_angle,
-                    species=species_summary,
-                    extra=extra,
-                )
-            )
-
-        metadata = GeneralInfo(
-            image_path=artifacts.image_path,
-            overlay_path=artifacts.overlay_path,
-            detection_metadata_path=artifacts.metadata_path,
-            detection_model="GroundingDINO",
-            segmentation_model=SAM2_MODELS.get(self._sam_model_name, self._sam_model_name),
-            species_model=species_model_name,
-            prompt=prompt,
-            box_threshold=self.box_threshold,
-            text_threshold=self.text_threshold,
-            generated_at=datetime.utcnow().isoformat(timespec="seconds") + "Z",
-            image_size=artifacts.image_size,
-            crop_mode=crop_mode,
-            total_instances=total_instances,
-            tree_count=tree_count,
-            shrub_count=shrub_count,
-            additional={
-                "multimask_output": multimask_output,
-                "total_mask_area_px": total_mask_area,
-                "species_top_k": species_top_k,
-                "species_crop_padding": species_crop_padding,
-                "species_output_dir": str(species_output_dir) if species_model is not None else None,
-            } | (extra_general_info or {}),
-        )
-
-        report = DendroReport(general=metadata, instances=instances)
-        report_filename = report_filename or f"{Path(image_path).stem}_report.json"
-        report_path = Path(output_dir) / report_filename
-        report.save(report_path)
-        return report

@@ -1,155 +1,96 @@
-"""Minimal script showcasing how to run the Dendrotector pipeline."""
+#!/usr/bin/env python3
+"""
+Example runner for DendroDetector.
+
+Creates per-instance folders like:
+output/
+  instance_00/
+    overlay.png
+    mask.png
+    bbox.png
+    report.json
+"""
+
 from __future__ import annotations
 
+import os
+import sys
+sys.path.append("dendrotector")
+
+import json
 import argparse
 from pathlib import Path
 
-from dendrotector import DendroDetector
-from dendrotector.detector import DEFAULT_SPECIES_MODEL, PROMPT
-
+from detector import DendroDetector
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("image", type=Path, help="Path to the image to analyse.")
-    parser.add_argument(
-        "--output-dir",
-        type=Path,
-        default=Path("outputs"),
-        help="Where to store the generated masks and metadata.",
-    )
-    parser.add_argument(
-        "--models-dir",
-        type=Path,
-        default=None,
-        help="Optional directory where model weights should be cached.",
-    )
-    parser.add_argument(
-        "--device",
-        default=None,
-        help="Computation device (e.g. 'cuda', 'cuda:0' or 'cpu').",
-    )
-    parser.add_argument(
-        "--box-threshold",
-        type=float,
-        default=0.3,
-        help="Box confidence threshold for Grounding DINO.",
-    )
-    parser.add_argument(
-        "--text-threshold",
-        type=float,
-        default=0.25,
-        help="Text confidence threshold for Grounding DINO.",
-    )
-    parser.add_argument(
-        "--prompt",
-        default="tree . shrub . bush .",
-        help="Text prompt used to query Grounding DINO.",
-    )
-    parser.add_argument(
-        "--multimask-output",
-        action="store_true",
-        help="Ask SAM 2 for multiple mask hypotheses per detection.",
-    )
-    parser.add_argument(
-        "--skip-species",
-        action="store_true",
-        help="Skip the species classification stage.",
-    )
-    parser.add_argument(
-        "--species-model",
-        default=None,
-        help=(
-            "Optional Hugging Face model identifier for species classification. "
-            "Defaults to rexologue/vit_large_384_for_trees."
-        ),
-    )
-    parser.add_argument(
-        "--species-device",
-        default=None,
-        help="Device for the species classifier (defaults to the detector device).",
-    )
-    parser.add_argument(
-        "--species-top-k",
-        type=int,
-        default=5,
-        help="Number of top species predictions to store per detection.",
-    )
-    parser.add_argument(
-        "--species-crop-padding",
-        type=float,
-        default=0.05,
-        help="Extra padding added around each detection before cropping for classification.",
-    )
-    parser.add_argument(
-        "--species-batch-size",
-        type=int,
-        default=4,
-        help="Maximum number of cropped instances to classify at once.",
-    )
-    parser.add_argument(
-        "--species-keep-background",
-        action="store_true",
-        help="Disable mask application and keep the original background in the crops.",
-    )
-    parser.add_argument(
-        "--crop-mode",
-        choices=("bbox", "mask"),
-        default="mask",
-        help="How to compute crops for species classification.",
-    )
-    parser.add_argument(
-        "--report-filename",
-        default=None,
-        help="Optional custom name for the consolidated JSON report.",
-    )
-    return parser
+    p = argparse.ArgumentParser(description="Run DendroDetector on a single image.")
+    p.add_argument("image", type=Path, help="Path to input image.")
+    p.add_argument("--output-dir", type=Path, default=Path("output"), help="Directory to store instance_* folders.")
+    p.add_argument("--models-dir", type=Path, default=Path("~/.dendrocache"),
+                   help="Models/cache root (will contain groundingdino/, sam2/, specifier/).")
+    p.add_argument("--device", default=None,
+                   help="Computation device, e.g. 'cuda', 'cuda:0' or 'cpu'. Defaults to CUDA if available.")
+    p.add_argument("--box-threshold", type=float, default=0.3, help="GroundingDINO box confidence threshold.")
+    p.add_argument("--text-threshold", type=float, default=0.25, help="GroundingDINO text confidence threshold.")
+    p.add_argument("--top-k", type=int, default=5, help="How many top species predictions to keep.")
+    p.add_argument("--multimask-output", action="store_true",
+                   help="If set, SAM2 proposes multiple masks and the best one is selected.")
+    p.add_argument("--print-reports", action="store_true",
+                   help="Print each report.json to stdout after creation.")
+    return p
 
 
-def main() -> None:
+def main() -> int:
     args = build_parser().parse_args()
-    detector = DendroDetector(
+
+    image_path = args.image.expanduser().resolve()
+    output_dir = args.output_dir.expanduser().resolve()
+    models_dir = args.models_dir.expanduser().resolve()
+
+    if not image_path.exists():
+        print(f"[error] Image not found: {image_path}", file=sys.stderr)
+        return 2
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Create detector and run
+    det = DendroDetector(
         device=args.device,
         box_threshold=args.box_threshold,
         text_threshold=args.text_threshold,
-        models_dir=args.models_dir,
+        models_dir=models_dir,
     )
 
-    species_model = None if args.skip_species else (args.species_model or DEFAULT_SPECIES_MODEL)
-    report = detector.generate_report(
-        image_path=args.image,
-        output_dir=args.output_dir,
-        prompt=args.prompt or PROMPT,
-        multimask_output=args.multimask_output,
-        crop_mode=args.crop_mode,
-        species_model=species_model,
-        species_device=args.species_device or args.device,
-        species_top_k=args.species_top_k,
-        species_crop_padding=args.species_crop_padding,
-        species_batch_size=args.species_batch_size,
-        species_apply_mask=not args.species_keep_background,
-        report_filename=args.report_filename,
-    )
-
-    if not report.instances:
-        print("No trees or shrubs detected.")
-        return
-
-    print(f"Detection overlay saved to {report.general.overlay_path}")
-    print(f"Detection metadata saved to {report.general.detection_metadata_path}")
-    if report.report_path is not None:
-        print(f"Consolidated report saved to {report.report_path}")
-
-    for instance in report.instances:
-        summary = (
-            f"instance#{instance.index} type={instance.instance_type} "
-            f"bbox={instance.detection.bbox} score={instance.detection.score:.3f}"
+    try:
+        instance_dirs = det.detect(
+            image_path=image_path,
+            output_dir=output_dir,
+            top_k=args.top_k,
+            multimask_output=args.multimask_output,
         )
-        if instance.species is not None:
-            top1_label = instance.species.label
-            top1_score = instance.species.score
-            summary += f" species={top1_label!r} ({top1_score:.3f})"
-        print(summary)
+    except Exception as e:
+        print(f"[error] Detection failed: {e}", file=sys.stderr)
+        return 1
+
+    if not instance_dirs:
+        print("[info] No instances detected.")
+        return 0
+
+    print(f"[ok] Created {len(instance_dirs)} instance folder(s) under: {output_dir}")
+    for i, inst in enumerate(instance_dirs):
+        print(f"  - instance_{i:02d}: {inst}")
+
+        if args.print_reports:
+            rpt = inst / "report.json"
+            try:
+                data = json.loads(rpt.read_text(encoding="utf-8"))
+                print(json.dumps(data, ensure_ascii=False, indent=2))
+            except Exception as e:
+                print(f"    [warn] Could not read report.json: {e}")
+
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
