@@ -3,9 +3,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Sequence
+from typing import TYPE_CHECKING, Any, Sequence
 
-from .detector import DetectionResult
+if TYPE_CHECKING:  # pragma: no cover - imported for static analysis only
+    from .detector import DetectionResult
 
 
 @dataclass
