@@ -19,7 +19,7 @@ from sam2.sam2_image_predictor import SAM2ImagePredictor
 from sam2.build_sam import HF_MODEL_ID_TO_FILENAMES, build_sam2
 
 from species_identifier import SpeciesIdentifier
-from . import resolve_cache_dir
+from . import resolve_cache_dir, resolve_hf_cache_dir
 
 PROMPT = "tree . shrub . bush ."
 
@@ -48,6 +48,7 @@ class DendroDetector:
 
         self._models_dir = resolve_cache_dir(models_dir)
         self._models_dir.mkdir(parents=True, exist_ok=True)
+        self._hf_cache_dir = resolve_hf_cache_dir(self._models_dir)
 
         self._dino_model = self._load_groundingdino()
         self._sam_predictor = self._load_sam2()
@@ -58,11 +59,19 @@ class DendroDetector:
     ################
 
     def _load_groundingdino(self):
-        groundingdino_dir = self._models_dir / "groundingdino"
+        groundingdino_dir = self._hf_cache_dir / "groundingdino"
         groundingdino_dir.mkdir(parents=True, exist_ok=True)
 
-        config_path = hf_hub_download(GROUNDING_REPO, GROUNDING_CONFIG, local_dir=groundingdino_dir)
-        weights_path = hf_hub_download(GROUNDING_REPO, GROUNDING_WEIGHTS, local_dir=groundingdino_dir)
+        config_path = hf_hub_download(
+            GROUNDING_REPO,
+            GROUNDING_CONFIG,
+            cache_dir=str(groundingdino_dir),
+        )
+        weights_path = hf_hub_download(
+            GROUNDING_REPO,
+            GROUNDING_WEIGHTS,
+            cache_dir=str(groundingdino_dir),
+        )
 
         model = load_model(str(config_path), str(weights_path))
 
@@ -72,11 +81,15 @@ class DendroDetector:
         return model
 
     def _load_sam2(self) -> SAM2ImagePredictor:
-        sam2_dir = self._models_dir / "sam2"
+        sam2_dir = self._hf_cache_dir / "sam2"
         sam2_dir.mkdir(parents=True, exist_ok=True)
 
         config_name, checkpoint_name = HF_MODEL_ID_TO_FILENAMES[SAM2_REPO]
-        ckpt_path   = hf_hub_download(SAM2_REPO, filename=checkpoint_name, local_dir=sam2_dir)
+        ckpt_path   = hf_hub_download(
+            SAM2_REPO,
+            filename=checkpoint_name,
+            cache_dir=str(sam2_dir),
+        )
 
         sam_model_instance = build_sam2(
             config_file=config_name,      

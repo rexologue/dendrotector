@@ -52,20 +52,50 @@ pip install -r requirements.txt
 ```
 
 The first run downloads the GroundingDINO, SAM 2, and species classifier weights
-from the Hugging Face Hub into `~/.dendrocache` (or a custom directory). Ensure
+from the Hugging Face Hub into `~/.dendrocache` (or a custom directory). The
+resolver also wires Hugging Face’s cache (`HF_HOME`/`HUGGINGFACE_HUB_CACHE`) to
+`~/.dendrocache/huggingface`, ensuring that every download lands inside the same
+volume-backed directory rather than the ephemeral container filesystem. Ensure
 that you are authenticated with `huggingface-cli login` if the models require
 access and that you have roughly 4 GB of free disk space for the larger SAM 2
-checkpoint. Use the `DENDROCACHE_PATH` environment variable, the `--models-dir`
-CLI flag, or the `models_dir` constructor argument to cache models elsewhere. 【F:dendrotector/__init__.py†L1-L33】【F:dendrotector/detector.py†L27-L74】【F:dendrotector/species_identifier.py†L19-L46】
+checkpoint. Override the cache location with the `DENDROCACHE_PATH`
+environment variable, the `--models-dir` CLI flag, or the `models_dir`
+constructor argument. 【F:dendrotector/__init__.py†L1-L42】【F:dendrotector/detector.py†L27-L78】【F:dendrotector/species_identifier.py†L19-L46】
 
-If you want the Docker build/runtime to use a different location—e.g., a
-writable volume you mount from the host—set `DENDROCACHE_PATH` in the container
-environment (`docker run -e DENDROCACHE_PATH=/models …` or add another `ENV`
-line in the Dockerfile) so the resolver points the downloads at that path. You
-can mount the same directory on subsequent runs to avoid re-downloading the
-weights. The helper script at `tools/run_api_container.sh` accepts
-`--cache-dir /host/path` to bind-mount a host directory and inject
-`DENDROCACHE_PATH` automatically. 【F:tools/run_api_container.sh†L1-L126】
+### Docker deployment
+
+The repository ships with `tools/run_api_container.sh`, a convenience script
+that builds the image and launches the FastAPI server with a bind-mounted model
+cache. Configure it through three environment variables:
+
+```bash
+export PORT=8080            # Host port that will be forwarded to the container
+export DEVICE=cuda:0        # auto|cpu|cuda|cuda:N (defaults to auto)
+export DENDROCACHE_PATH=~/dendrocache  # Optional; defaults to ~/.dendrocache
+./tools/run_api_container.sh
+```
+
+When `DENDROCACHE_PATH` is unset the script mounts the host’s
+`~/.dendrocache` into `/root/.dendrocache` inside the container. If you do set
+`DENDROCACHE_PATH`, its absolute path is reused both on the host and inside the
+container so that the directory is always a Docker volume. In either case the
+script exports `HF_HOME` and `HUGGINGFACE_HUB_CACHE` to the same bind mount, so
+the Hugging Face Hub never duplicates checkpoints. The container is started with
+`-p ${PORT}:${PORT}` and uvicorn binds to `0.0.0.0:${PORT}`, meaning requests
+made to `http://<host>:${PORT}` from any machine on the network reach the
+FastAPI app directly—no extra port-forwarding steps are required. 【F:tools/run_api_container.sh†L1-L109】【F:Dockerfile†L16-L20】【F:dendrotector/api.py†L8-L56】
+
+After the container is up you can submit a detection job with a simple `curl`
+command:
+
+```bash
+curl -X POST "http://localhost:${PORT}/detect?top_k=3" \
+  -F "image=@/path/to/trees.jpg" \
+  --output detections.zip
+```
+
+The response is a ZIP archive containing per-instance artefacts alongside a
+`summary.json` file with the total instance count. 【F:dendrotector/api.py†L58-L116】
 
 ### Troubleshooting build issues
 

@@ -25,16 +25,24 @@ class SpeciesIdentifier:
     ) -> None:
         self.device = device
 
-        from . import resolve_cache_dir
+        from . import resolve_cache_dir, resolve_hf_cache_dir
 
         self._models_dir = resolve_cache_dir(models_dir)
         self._models_dir.mkdir(exist_ok=True)
-        
-        model_dir = self._models_dir / "specifier"
+
+        model_dir = resolve_hf_cache_dir(self._models_dir) / "specifier"
         model_dir.mkdir(parents=True, exist_ok=True)
 
-        labels_path = hf_hub_download(MODEL_REPO, filename="labels.json", local_dir=model_dir)
-        ckpt_path = hf_hub_download(MODEL_REPO, filename="pytorch_model.bin", local_dir=model_dir)
+        labels_path = hf_hub_download(
+            MODEL_REPO,
+            filename="labels.json",
+            cache_dir=str(model_dir),
+        )
+        ckpt_path = hf_hub_download(
+            MODEL_REPO,
+            filename="pytorch_model.bin",
+            cache_dir=str(model_dir),
+        )
 
         with open(labels_path, "r", encoding="utf-8") as f:
             raw = json.load(f)
