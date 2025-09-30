@@ -48,7 +48,7 @@ def _get_detector() -> DendroDetector:
 
     global _detector_instance
     if _detector_instance is None:
-        _detector_instance = DendroDetector(device="cuda:5")
+        _detector_instance = DendroDetector()
     return _detector_instance
 
 
