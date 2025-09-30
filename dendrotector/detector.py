@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import json
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Union
 
 import cv2
 import torch
@@ -19,6 +19,7 @@ from sam2.sam2_image_predictor import SAM2ImagePredictor
 from sam2.build_sam import HF_MODEL_ID_TO_FILENAMES, build_sam2
 
 from species_identifier import SpeciesIdentifier
+from . import resolve_cache_dir
 
 PROMPT = "tree . shrub . bush ."
 
@@ -38,14 +39,14 @@ class DendroDetector:
         device: Optional[str] = None,
         box_threshold: float = 0.3,
         text_threshold: float = 0.25,
-        models_dir: Path = Path("~/.dendrocache"),
+        models_dir: Union[Path, str, None] = None,
     ) -> None:
-        
+
         self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
         self.box_threshold = box_threshold
         self.text_threshold = text_threshold
 
-        self._models_dir = Path(models_dir).expanduser().resolve()
+        self._models_dir = resolve_cache_dir(models_dir)
         self._models_dir.mkdir(parents=True, exist_ok=True)
 
         self._dino_model = self._load_groundingdino()
