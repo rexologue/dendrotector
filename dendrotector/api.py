@@ -17,9 +17,6 @@ environment variable before starting the server (for example ``cpu`` or
 from __future__ import annotations
 
 import os
-import sys
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-
 import io
 import json
 import zipfile
@@ -30,8 +27,7 @@ from typing import List
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
 
-from detector import DendroDetector, PROMPT
-
+from .detector import DendroDetector, PROMPT
 
 app = FastAPI(
     title="DendroDetector API",

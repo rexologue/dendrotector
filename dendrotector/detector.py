@@ -18,7 +18,7 @@ from huggingface_hub import hf_hub_download
 from sam2.sam2_image_predictor import SAM2ImagePredictor
 from sam2.build_sam import HF_MODEL_ID_TO_FILENAMES, build_sam2
 
-from species_identifier import SpeciesIdentifier
+from .species_identifier import SpeciesIdentifier
 from . import resolve_cache_dir, resolve_hf_cache_dir
 
 PROMPT = "tree . shrub . bush ."
