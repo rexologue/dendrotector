@@ -85,6 +85,23 @@ the Hugging Face Hub never duplicates checkpoints. The container is started with
 made to `http://<host>:${PORT}` from any machine on the network reach the
 FastAPI app directly—no extra port-forwarding steps are required. 【F:tools/run_api_container.sh†L1-L109】【F:Dockerfile†L16-L20】【F:dendrotector/api.py†L8-L56】
 
+### Hugging Face authentication
+
+Private Hugging Face repositories require a token. Export it via
+`DENDROTECTOR_HF_TOKEN`, `HF_TOKEN`, or `HUGGING_FACE_HUB_TOKEN` before running
+the helper script and the API will log in automatically during the first model
+initialisation. The Docker wrapper forwards any of these variables into the
+container without echoing the secret, and the FastAPI app prints a one-time
+notice that the initial download may take several minutes.
+
+```bash
+export DENDROTECTOR_HF_TOKEN="hf_..."
+./tools/run_api_container.sh
+```
+
+If you prefer interactive authentication you can still run `huggingface-cli
+login` inside the container.
+
 After the container is up you can submit a detection job with a simple `curl`
 command:
 

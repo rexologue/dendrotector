@@ -108,7 +108,20 @@ if [[ ${#GPU_ARGS[@]} -gt 0 ]]; then
   RUN_ARGS+=( "${GPU_ARGS[@]}" )
 fi
 
+FORWARDED_SECRET=0
+for token_var in DENDROTECTOR_HF_TOKEN HF_TOKEN HUGGING_FACE_HUB_TOKEN; do
+  if [[ -n ${!token_var-} ]]; then
+    RUN_ARGS+=( -e "${token_var}=${!token_var}" )
+    FORWARDED_SECRET=1
+  fi
+done
+
 RUN_ARGS+=( "${IMAGE_NAME}" )
 
-echo "Executing: ${RUN_ARGS[*]}"
+if [[ ${FORWARDED_SECRET} -eq 1 ]]; then
+  echo "Executing docker run with Hugging Face credentials forwarded (command redacted)."
+else
+  echo "Executing: ${RUN_ARGS[*]}"
+fi
+
 exec "${RUN_ARGS[@]}"
