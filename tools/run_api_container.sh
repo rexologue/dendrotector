@@ -1,72 +1,50 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-IMAGE_NAME="dendrotector-api"
-PORT=8000
-DEVICE="auto"
+# Helper script for building and launching the DendroDetector API container.
+#
+# Configuration is controlled via three environment variables:
+#   PORT              – host port that will be forwarded to the container.
+#   DEVICE            – inference device (auto|cpu|cuda|cuda:N).
+#   DENDROCACHE_PATH  – host directory used to persist downloaded model weights.
+#                        If unset, defaults to "$HOME/.dendrocache" and is
+#                        mounted into the container at "/root/.dendrocache".
 
-usage() {
-    cat <<USAGE
-Usage: $(basename "$0") [--port PORT] [--device {cpu|cuda|cuda:N}] [--cache-dir PATH] [--no-build]
+IMAGE_NAME=${IMAGE_NAME:-dendrotector-api}
+PORT=${PORT:-8000}
+DEVICE=${DEVICE:-auto}
 
-Options:
-  --port PORT        Host port to expose the API on (default: 8000).
-  --device VALUE     Execution device for the detector. Accepts "cpu", "cuda", or
-                     "cuda:N" to target a specific GPU index (default: auto).
-  --cache-dir PATH   Host directory to persist downloaded model weights. The
-                     directory is bind-mounted into the container and exposed via
-                     the DENDROCACHE_PATH environment variable.
-  --no-build         Skip rebuilding the Docker image before running.
-  -h, --help         Show this help message and exit.
-USAGE
-}
+USER_SUPPLIED_CACHE=${DENDROCACHE_PATH-}
+RAW_CACHE_PATH=${DENDROCACHE_PATH:-$HOME/.dendrocache}
 
-SHOULD_BUILD=1
-CACHE_DIR=""
+HOST_CACHE_PATH=$(RAW_CACHE_PATH="$RAW_CACHE_PATH" python - <<'PY'
+import os
+raw = os.environ["RAW_CACHE_PATH"]
+print(os.path.abspath(os.path.expanduser(raw)))
+PY
+)
 
-while [[ $# -gt 0 ]]; do
-    case "$1" in
-        --port)
-            PORT="$2"
-            shift 2
-            ;;
-        --device)
-            DEVICE="$2"
-            shift 2
-            ;;
-        --cache-dir)
-            CACHE_DIR="$2"
-            shift 2
-            ;;
-        --no-build)
-            SHOULD_BUILD=0
-            shift
-            ;;
-        -h|--help)
-            usage
-            exit 0
-            ;;
-        *)
-            echo "Unknown option: $1" >&2
-            usage >&2
-            exit 1
-            ;;
-    esac
-done
-
-if ! [[ $PORT =~ ^[0-9]+$ ]]; then
-    echo "Error: port must be a numeric value." >&2
+if [[ -z $HOST_CACHE_PATH ]]; then
+    echo "Failed to resolve cache directory path." >&2
     exit 1
 fi
 
-if [[ -n $CACHE_DIR ]]; then
-    if [[ ! -d $CACHE_DIR ]]; then
-        mkdir -p -- "$CACHE_DIR"
-    fi
+# The container path defaults to /root/.dendrocache unless the user explicitly
+# provided DENDROCACHE_PATH, in which case we reuse the same absolute path.
+if [[ -n $USER_SUPPLIED_CACHE ]]; then
+    CONTAINER_CACHE_PATH="$HOST_CACHE_PATH"
+else
+    CONTAINER_CACHE_PATH="/root/.dendrocache"
+fi
 
-    pushd "$CACHE_DIR" >/dev/null
-    CACHE_DIR_ABS=$(pwd)
-    popd >/dev/null
+HF_CACHE_CONTAINER="${CONTAINER_CACHE_PATH}/huggingface"
+
+mkdir -p -- "$HOST_CACHE_PATH"
+mkdir -p -- "${HOST_CACHE_PATH}/huggingface"
+
+if ! [[ $PORT =~ ^[0-9]+$ ]]; then
+    echo "Error: PORT must be a numeric value (received '$PORT')." >&2
+    exit 1
 fi
 
 GPU_ARGS=()
@@ -92,23 +70,27 @@ case "$DEVICE" in
         GPU_ARGS=(--gpus "device=${GPU_INDEX}")
         ;;
     *)
-        echo "Error: unsupported device '$DEVICE'. Use cpu, cuda, or cuda:N." >&2
+        echo "Error: unsupported DEVICE '$DEVICE'. Use auto, cpu, cuda, or cuda:N." >&2
         exit 1
         ;;
 esac
 
-if [[ $SHOULD_BUILD -eq 1 ]]; then
+if [[ ${SKIP_BUILD:-0} -ne 1 ]]; then
     docker build -t "$IMAGE_NAME" .
 fi
 
-RUN_ARGS=(docker run --rm -p "${PORT}:${PORT}" -e "PORT=${PORT}")
+RUN_ARGS=(
+    docker run --rm
+    -p "${PORT}:${PORT}"
+    -e "PORT=${PORT}"
+    -e "DENDROCACHE_PATH=${CONTAINER_CACHE_PATH}"
+    -e "HF_HOME=${HF_CACHE_CONTAINER}"
+    -e "HUGGINGFACE_HUB_CACHE=${HF_CACHE_CONTAINER}"
+    -v "${HOST_CACHE_PATH}:${CONTAINER_CACHE_PATH}"
+)
 
 if [[ -n $DEVICE_ENV ]]; then
     RUN_ARGS+=( -e "DENDROTECTOR_DEVICE=${DEVICE_ENV}" )
-fi
-
-if [[ -n ${CACHE_DIR_ABS-} ]]; then
-    RUN_ARGS+=( -e "DENDROCACHE_PATH=${CACHE_DIR_ABS}" -v "${CACHE_DIR_ABS}:${CACHE_DIR_ABS}")
 fi
 
 if [[ ${GPU_ARGS[*]-} ]]; then
