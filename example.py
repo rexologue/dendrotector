@@ -20,7 +20,7 @@ import json
 import argparse
 from pathlib import Path
 
-from detector import DendroDetector
+from detector import DendroDetector # type: ignore
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Run DendroDetector on a single image.")
