@@ -12,6 +12,10 @@ Typical usage when deploying on a remote machine::
 """
 from __future__ import annotations
 
+import os
+import sys
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
 import io
 import json
 import zipfile
@@ -22,7 +26,7 @@ from typing import List
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
 
-from .detector import DendroDetector, PROMPT
+from detector import DendroDetector, PROMPT
 
 
 app = FastAPI(
@@ -44,7 +48,7 @@ def _get_detector() -> DendroDetector:
 
     global _detector_instance
     if _detector_instance is None:
-        _detector_instance = DendroDetector()
+        _detector_instance = DendroDetector(device="cuda:5")
     return _detector_instance
 
 
