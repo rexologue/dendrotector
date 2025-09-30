@@ -9,6 +9,10 @@ Typical usage when deploying on a remote machine::
 
     uvicorn dendrotector.api:app --host 0.0.0.0 --port 8000
 
+The detector device can be overridden by setting the ``DENDROTECTOR_DEVICE``
+environment variable before starting the server (for example ``cpu`` or
+``cuda:0``).
+
 """
 from __future__ import annotations
 
@@ -41,6 +45,7 @@ app = FastAPI(
 
 
 _detector_instance: DendroDetector | None = None
+_DEVICE_ENV_VAR = "DENDROTECTOR_DEVICE"
 
 
 def _get_detector() -> DendroDetector:
@@ -48,7 +53,8 @@ def _get_detector() -> DendroDetector:
 
     global _detector_instance
     if _detector_instance is None:
-        _detector_instance = DendroDetector()
+        requested_device = os.getenv(_DEVICE_ENV_VAR) or None
+        _detector_instance = DendroDetector(device=requested_device)
     return _detector_instance
 
 
