@@ -27,6 +27,7 @@ from typing import List
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
 
+from . import ensure_hf_login
 from .detector import DendroDetector, PROMPT
 
 app = FastAPI(
@@ -42,6 +43,7 @@ app = FastAPI(
 
 _detector_instance: DendroDetector | None = None
 _DEVICE_ENV_VAR = "DENDROTECTOR_DEVICE"
+_ANNOUNCED_DOWNLOAD = False
 
 
 def _get_detector() -> DendroDetector:
@@ -49,9 +51,27 @@ def _get_detector() -> DendroDetector:
 
     global _detector_instance
     if _detector_instance is None:
+        ensure_hf_login()
+        _announce_first_boot()
         requested_device = os.getenv(_DEVICE_ENV_VAR) or None
         _detector_instance = DendroDetector(device=requested_device)
     return _detector_instance
+
+
+def _announce_first_boot() -> None:
+    """Emit a one-time startup message about potential model downloads."""
+
+    global _ANNOUNCED_DOWNLOAD
+    if _ANNOUNCED_DOWNLOAD:
+        return
+
+    print(
+        "[Dendrotector] Initialising detection models. "
+        "The first startup may download checkpoints from the Hugging Face Hub; "
+        "subsequent runs reuse the cache.",
+        flush=True,
+    )
+    _ANNOUNCED_DOWNLOAD = True
 
 
 def _write_summary(output_dir: Path, instance_dirs: List[Path]) -> Path:
