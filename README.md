@@ -55,8 +55,17 @@ The first run downloads the GroundingDINO, SAM 2, and species classifier weight
 from the Hugging Face Hub into `~/.dendrocache` (or a custom directory). Ensure
 that you are authenticated with `huggingface-cli login` if the models require
 access and that you have roughly 4 GB of free disk space for the larger SAM 2
-checkpoint. Use the `--models-dir` CLI flag (or the `models_dir` constructor
-argument) to cache models elsewhere. 【F:dendrotector/detector.py†L27-L74】【F:dendrotector/species_identifier.py†L21-L46】
+checkpoint. Use the `DENDROCACHE_PATH` environment variable, the `--models-dir`
+CLI flag, or the `models_dir` constructor argument to cache models elsewhere. 【F:dendrotector/__init__.py†L1-L33】【F:dendrotector/detector.py†L27-L74】【F:dendrotector/species_identifier.py†L19-L46】
+
+If you want the Docker build/runtime to use a different location—e.g., a
+writable volume you mount from the host—set `DENDROCACHE_PATH` in the container
+environment (`docker run -e DENDROCACHE_PATH=/models …` or add another `ENV`
+line in the Dockerfile) so the resolver points the downloads at that path. You
+can mount the same directory on subsequent runs to avoid re-downloading the
+weights. The helper script at `tools/run_api_container.sh` accepts
+`--cache-dir /host/path` to bind-mount a host directory and inject
+`DENDROCACHE_PATH` automatically. 【F:tools/run_api_container.sh†L1-L126】
 
 ### Troubleshooting build issues
 

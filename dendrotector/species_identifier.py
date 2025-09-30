@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, Union
 from pathlib import Path
 
 import timm
@@ -21,11 +21,13 @@ class SpeciesIdentifier:
     def __init__(
         self,
         device: str | None = None,
-        models_dir: Path = Path("~/.dendrocache")
+        models_dir: Union[Path, str, None] = None,
     ) -> None:
         self.device = device
 
-        self._models_dir = Path(models_dir).expanduser().resolve()
+        from . import resolve_cache_dir
+
+        self._models_dir = resolve_cache_dir(models_dir)
         self._models_dir.mkdir(exist_ok=True)
         
         model_dir = self._models_dir / "specifier"
