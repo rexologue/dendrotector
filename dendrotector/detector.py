@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import os
+import sys
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
 import json
 from pathlib import Path
-from typing import List, Optional, Union
+from typing import List, Optional
 
 import logging
 
@@ -24,6 +27,7 @@ from sam2.sam2_image_predictor import SAM2ImagePredictor
 from sam2.build_sam import HF_MODEL_ID_TO_FILENAMES, build_sam2
 
 from utils import load_from_hf
+from disease_detector import DiseaseDetector
 from species_identifier import SpeciesIdentifier
 
 PROMPT = "tree . shrub . bush ."
@@ -73,6 +77,11 @@ class DendroDetector:
         self._log.info("Initialising species identifier")
         self._species_identifier = SpeciesIdentifier(self.device, self._models_dir) # type: ignore
         self._log.info("Species identifier initialised")
+
+        self._log.info("Initialising diseases detector")
+        self._diseases_detector = DiseaseDetector(device, self._models_dir) # type: ignore
+        self._log.info("Diseases detector initialised")
+
 
     ################
     # LOAD METHODS #
@@ -138,6 +147,7 @@ class DendroDetector:
         image_path: os.PathLike[str] | str,
         output_dir: os.PathLike[str] | str,
         top_k: int,
+        api_format: bool = False,
         *,
         prompt: str = PROMPT,
         multimask_output: bool = False,
@@ -245,7 +255,8 @@ class DendroDetector:
             cv2.imwrite(str(instance_dir / "overlay.png"), overlay_bgr)
 
             # mask.png — RGBA (внутри _save_mask делается RGBA->BGRA для OpenCV)
-            self._save_mask(mask_bool, instance_dir / "mask.png")
+            if not api_format:
+                self._save_mask(mask_bool, instance_dir / "mask.png")
 
             # bbox.png — кроп (эксклюзивные границы)
             crop_rgb = image_source[y0_c:y1_c, x0_c:x1_c]
@@ -254,6 +265,7 @@ class DendroDetector:
                 crop_rgb = image_source[max(0, y0_c):max(0, y0_c + 1), max(0, x0_c):max(0, x0_c + 1)]
             crop_bgr = cv2.cvtColor(crop_rgb, cv2.COLOR_RGB2BGR)
             bbox_path = instance_dir / "bbox.png"
+
             cv2.imwrite(str(bbox_path), crop_bgr)
 
             # report.json — метаданные
@@ -263,6 +275,16 @@ class DendroDetector:
 
             species, k = self._species_identifier.identify(bbox_path, top_k)
 
+            bbox_labeled, diseases_detections = self._diseases_detector.detect(bbox_path, score_threshold=0.3)
+            cv2.imwrite(str(instance_dir / "disease.png"), bbox_labeled)
+
+            real_diseases = []
+            for disease in diseases_detections:
+                real_diseases.append({disease["class_name"]: disease["score"]})
+
+            if api_format:
+                os.remove(bbox_path)
+
             report = {
                 "type": instance_type,                           # "tree" | "shrub"
                 "score": float(np.max(logit_vec)),               # уверенность DINO по этому боксу
@@ -271,7 +293,8 @@ class DendroDetector:
                 "top_k": k,                                      # фактический k после капа
                 "species": species[0]["label"],
                 "species_score": species[0]["prob"],
-                "top_k_species": species
+                "top_k_species": species,
+                "diseases": real_diseases
             }
             with (instance_dir / "report.json").open("w", encoding="utf-8") as fp:
                 json.dump(report, fp, ensure_ascii=False, indent=2)

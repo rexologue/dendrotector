@@ -153,6 +153,7 @@ async def detect(
             image_path=input_path,
             output_dir=output_dir,
             top_k=top_k,
+            api_format=True,
             prompt=prompt,
             multimask_output=multimask_output,
         )

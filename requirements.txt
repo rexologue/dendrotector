@@ -10,3 +10,7 @@ transformers>=4.36.0
 fastapi>=0.110.0
 uvicorn>=0.22.0
 python-multipart>=0.0.6
+onnx 
+onnxslim 
+onnxruntime-gpu
+ultralytics-thop>=2.0.0

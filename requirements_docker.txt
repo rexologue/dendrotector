@@ -8,3 +8,7 @@ transformers
 fastapi
 uvicorn[standard]
 python-multipart
+onnx 
+onnxslim 
+onnxruntime-gpu
+ultralytics-thop>=2.0.0
