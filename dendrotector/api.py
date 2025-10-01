@@ -17,6 +17,9 @@ environment variable before starting the server (for example ``cpu`` or
 from __future__ import annotations
 
 import os
+import sys
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
 import io
 import json
 import logging
