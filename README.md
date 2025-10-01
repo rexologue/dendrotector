@@ -25,6 +25,10 @@ species-ranked predictions from a single photograph.
   confidences and an auto-capped `k` if fewer classes are available.【F:dendrotector/species_identifier.py†L15-L74】
 - **Geometric attributes** – Basic lean-angle estimation is calculated from each
   mask, allowing quick screening of tilt or fall risk.【F:dendrotector/detector.py†L248-L321】
+- **Visible disease cues** – An ONNX-exported YOLO detector flags bark damage,
+  hollows, cracks and other pathologies inside each crop, adding an annotated
+  `disease.png` overlay and scored labels to the per-instance report whenever a
+  symptom is found.【F:dendrotector/detector.py†L276-L303】【F:dendrotector/disease_detector.py†L18-L281】
 - **Self-contained exports** – Each detection is written to its own
   `instance_XX/` directory with the mask, overlay, bbox crop, and structured
   `report.json` describing scores, geometry, and species hypotheses.【F:dendrotector/detector.py†L160-L223】
@@ -35,6 +39,8 @@ species-ranked predictions from a single photograph.
 dendrotector/
   detector.py            # High level GroundingDINO + SAM 2 runner and exporters
   species_identifier.py  # ViT-L/16 classifier wrapper with Hugging Face weights
+  disease_detector.py    # ONNXRuntime wrapper that highlights tree ailments
+  utils.py               # Shared helpers (e.g. Hugging Face downloads)
 example.py               # CLI entry point for local experimentation
 requirements.txt         # Python dependencies (GroundingDINO + SAM 2 from Git)
 ```
@@ -55,19 +61,18 @@ pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-The first run downloads the GroundingDINO, SAM 2, and species classifier weights
-from the Hugging Face Hub into `~/.dendrocache` (or a custom directory). The
-resolver also wires Hugging Face’s cache (`HF_HOME`/`HUGGINGFACE_HUB_CACHE`) to
-`~/.dendrocache/huggingface`, ensuring that every download lands inside the same
-volume-backed directory rather than the ephemeral container filesystem.【F:dendrotector/__init__.py†L13-L122】
+The first run downloads the GroundingDINO, SAM 2, species classifier and disease
+detector weights from the Hugging Face Hub into `~/.dendrocache` (or a custom
+directory) under `groundingdino/`, `sam2/`, `specifier/`, and
+`diseaser/` respectively.【F:dendrotector/detector.py†L49-L138】【F:dendrotector/disease_detector.py†L30-L72】
 
 ### Model cache behaviour
 
 If you already have the checkpoints you can drop them into the cache hierarchy
-and they will be used as-is. `DendroDetector` and the species classifier look
-for exact filenames such as
-`~/.dendrocache/huggingface/sam2/<checkpoint>.pth` before contacting the Hugging
-Face Hub, falling back to a download only when the file is missing.【F:dendrotector/__init__.py†L74-L122】【F:dendrotector/detector.py†L63-L88】【F:dendrotector/species_identifier.py†L27-L44】
+and they will be used as-is. `DendroDetector`, the species classifier and the
+disease detector all check for specific filenames (for example
+`~/.dendrocache/sam2/<checkpoint>.pth` and `~/.dendrocache/diseaser/model.onnx`)
+before hitting the Hugging Face Hub.【F:dendrotector/detector.py†L68-L138】【F:dendrotector/species_identifier.py†L18-L64】【F:dendrotector/disease_detector.py†L30-L72】
 
 See [`APP.md`](APP.md) for containerised deployment and FastAPI usage, including
 the `tools/run_api_container.sh` helper for spinning up the FastAPI service with
@@ -86,7 +91,7 @@ Key options:
 | Flag | Description |
 | ---- | ----------- |
 | `--device` | Force `cpu`, `cuda`, or a specific GPU (defaults to CUDA when available). |
-| `--models-dir` | Directory that stores downloaded weights (`groundingdino/`, `sam2/`, `specifier/`). |
+| `--models-dir` | Directory that stores downloaded weights (`groundingdino/`, `sam2/`, `specifier/`, `diseaser/`). |
 | `--box-threshold` | Minimum GroundingDINO box confidence (default `0.3`). |
 | `--text-threshold` | Minimum GroundingDINO text confidence (default `0.25`). |
 | `--top-k` | Number of species predictions to retain (auto-clamped to the label set). |
@@ -125,9 +130,9 @@ for inst in instance_dirs:
 
 `detect` returns the list of created `instance_*` directories. Each `report.json`
 contains the instance type (`tree` or `shrub`), detection score, pixel-aligned
-bounding box, optional lean angle, the final species pick, and the full top-k
-species list. Mask alpha channels are encoded in BGRA format for OpenCV
-compatibility.【F:dendrotector/detector.py†L160-L233】
+bounding box, optional lean angle, the final species pick, the full top-k
+species list, and any disease detections with scores. Mask alpha channels are
+encoded in BGRA format for OpenCV compatibility.【F:dendrotector/detector.py†L249-L305】
 
 ## Output artifacts
 
@@ -136,8 +141,10 @@ For every detected instance, the pipeline saves:
 - `overlay.png` – RGB image with bounding box, mask tint, and index annotation.
 - `mask.png` – Binary mask stored as a semi-transparent BGRA image.
 - `bbox.png` – Tight crop of the detection’s bounding box.
-- `report.json` – Structured metadata including species probabilities and lean
-  angle.
+- `disease.png` – Optional crop annotated with detected ailments (only when a
+  pathology is found).
+- `report.json` – Structured metadata including species probabilities, lean
+  angle, and disease scores.【F:dendrotector/detector.py†L249-L305】
 
 The parent output directory mirrors your chosen input (e.g. `results/forest/`).
 If no detections are found the directory remains empty.【F:dendrotector/detector.py†L160-L233】
