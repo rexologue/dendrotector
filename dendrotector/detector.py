@@ -276,7 +276,9 @@ class DendroDetector:
             species, k = self._species_identifier.identify(bbox_path, top_k)
 
             bbox_labeled, diseases_detections = self._diseases_detector.detect(bbox_path, score_threshold=0.3)
-            cv2.imwrite(str(instance_dir / "disease.png"), bbox_labeled)
+
+            if len(diseases_detections) != 0:
+                cv2.imwrite(str(instance_dir / "disease.png"), bbox_labeled)
 
             real_diseases = []
             for disease in diseases_detections:

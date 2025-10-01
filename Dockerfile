@@ -33,7 +33,7 @@ FROM base AS runtime
 
 # Рантайм-зависимости (без компилятора): git для HF и libgl1 для OpenCV
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    git libgl1 libglib2.0-0 cudnn9-cuda-12 \
+    git libgl1 libglib2.0-0 \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

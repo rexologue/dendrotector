@@ -78,17 +78,16 @@ class DiseaseDetector:
         providers = ["CPUExecutionProvider"]
         provider_options = [{}]
 
-        if self.device.startswith("cuda") and "CUDAExecutionProvider" in avail:
-            # Извлечь device_id из 'cuda:5' → 5
-            m = re.match(r"cuda(?::(\d+))?$", self.device)
-            dev_id = int(m.group(1)) if m and m.group(1) is not None else 0
-            providers = [("CUDAExecutionProvider", {"device_id": dev_id}), "CPUExecutionProvider"]
-            provider_options = None  # когда указываем опции прямо в providers, provider_options не используется
+        ort.set_default_logger_severity(3)  # ERROR и выше; поставь 4, если хочешь тишину
+        use_cuda = self.device.startswith("cuda") and "CUDAExecutionProvider" in ort.get_available_providers()
+        if use_cuda:
+            m = re.match(r"cuda(?::(\d+))?$", self.device); dev_id = int(m.group(1)) if m and m.group(1) else 0
+            try:
+                sess = ort.InferenceSession(self.onnx_path, providers=[("CUDAExecutionProvider", {"device_id": dev_id})])
+            except Exception:
+                sess = ort.InferenceSession(self.onnx_path, providers=["CPUExecutionProvider"])
         else:
-            # остаёмся на CPU
-            pass
-
-        sess = ort.InferenceSession(self.onnx_path, providers=providers)
+            sess = ort.InferenceSession(self.onnx_path, providers=["CPUExecutionProvider"])
 
         # считаем форму входа: [N, C, H, W]; бывает dynamic → там могут быть str/None
         i0 = sess.get_inputs()[0]

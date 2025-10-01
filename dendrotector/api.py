@@ -64,8 +64,9 @@ def _check_models() -> bool:
     sam2_weights = (_MODELS_DIR / "sam2" / sam2_checkpoint_name).exists()
     specifier_labels = (_MODELS_DIR / "specifier" / "labels.json").exists()
     specifier_weights = (_MODELS_DIR / "specifier" / "pytorch_model.bin").exists()
+    diseaser_weights = (_MODELS_DIR / "diseaser" / "model.onnx").exists()
 
-    return dino_config and dino_weights and bert_repo and sam2_weights and specifier_labels and specifier_weights
+    return dino_config and dino_weights and bert_repo and sam2_weights and specifier_labels and specifier_weights and diseaser_weights
 
 
 def _get_detector() -> DendroDetector:
