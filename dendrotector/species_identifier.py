@@ -8,7 +8,6 @@ from pathlib import Path
 import timm
 import torch
 from PIL import Image
-from huggingface_hub import hf_hub_download
 from timm.data.transforms_factory import create_transform
 from timm.data.constants import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 
@@ -25,7 +24,7 @@ class SpeciesIdentifier:
     ) -> None:
         self.device = device
 
-        from . import resolve_cache_dir, resolve_hf_cache_dir
+        from . import ensure_local_hf_file, resolve_cache_dir, resolve_hf_cache_dir
 
         self._models_dir = resolve_cache_dir(models_dir)
         self._models_dir.mkdir(exist_ok=True)
@@ -33,15 +32,15 @@ class SpeciesIdentifier:
         model_dir = resolve_hf_cache_dir(self._models_dir) / "specifier"
         model_dir.mkdir(parents=True, exist_ok=True)
 
-        labels_path = hf_hub_download(
+        labels_path = ensure_local_hf_file(
             MODEL_REPO,
-            filename="labels.json",
-            cache_dir=str(model_dir),
+            "labels.json",
+            model_dir,
         )
-        ckpt_path = hf_hub_download(
+        ckpt_path = ensure_local_hf_file(
             MODEL_REPO,
-            filename="pytorch_model.bin",
-            cache_dir=str(model_dir),
+            "pytorch_model.bin",
+            model_dir,
         )
 
         with open(labels_path, "r", encoding="utf-8") as f:
