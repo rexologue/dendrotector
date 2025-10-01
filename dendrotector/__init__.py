@@ -9,8 +9,11 @@ the same directory, preventing duplicate downloads in ephemeral containers.
 from __future__ import annotations
 
 import os
+import shutil
 from pathlib import Path
 from typing import Optional, Union
+
+from huggingface_hub import hf_hub_download
 
 
 ENV_CACHE_PATH = "DENDROCACHE_PATH"
@@ -133,9 +136,65 @@ def resolve_hf_cache_dir(override: Optional[Union[str, Path]] = None) -> Path:
     return (base / _HF_SUBDIR).expanduser().resolve()
 
 
+def ensure_local_hf_file(
+    repo_id: str,
+    filename: str,
+    target_dir: Union[str, Path],
+    *,
+    subfolder: Optional[str] = None,
+    local_filename: Optional[str] = None,
+    **download_kwargs,
+) -> Path:
+    """Return the on-disk path of ``filename`` stored inside ``target_dir``.
+
+    The helper first checks whether the expected file already exists to avoid
+    redundant downloads when the user pre-populates the cache directory (for
+    instance by copying ``*.pth`` checkpoints into
+    ``~/.dendrocache/huggingface/``). When the file is missing it is fetched
+    from the Hugging Face Hub with ``local_dir`` pointing to ``target_dir`` so
+    that the resulting path matches the location being checked.
+    """
+
+    directory = Path(target_dir)
+    directory.mkdir(parents=True, exist_ok=True)
+
+    local_name = local_filename or Path(filename).name
+    local_path = directory / local_name
+
+    if local_path.exists():
+        return local_path
+
+    download_params = {
+        "repo_id": repo_id,
+        "filename": filename,
+        "cache_dir": str(directory),
+        "local_dir": str(directory),
+        "local_dir_use_symlinks": False,
+        **download_kwargs,
+    }
+
+    if subfolder is not None:
+        download_params.setdefault("subfolder", subfolder)
+
+    downloaded = Path(hf_hub_download(**download_params))
+
+    if local_path.exists():
+        return local_path
+
+    if downloaded.exists() and downloaded != local_path:
+        try:
+            shutil.copy2(downloaded, local_path)
+            return local_path
+        except OSError:
+            pass
+
+    return local_path if local_path.exists() else downloaded
+
+
 __all__ = [
     "ENV_CACHE_PATH",
     "ensure_hf_login",
+    "ensure_local_hf_file",
     "resolve_cache_dir",
     "resolve_hf_cache_dir",
 ]

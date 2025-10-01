@@ -13,13 +13,11 @@ from PIL import Image
 from groundingdino.util import box_ops
 from groundingdino.util.inference import load_image, load_model, predict
 
-from huggingface_hub import hf_hub_download
-
 from sam2.sam2_image_predictor import SAM2ImagePredictor
 from sam2.build_sam import HF_MODEL_ID_TO_FILENAMES, build_sam2
 
 from .species_identifier import SpeciesIdentifier
-from . import resolve_cache_dir, resolve_hf_cache_dir
+from . import ensure_local_hf_file, resolve_cache_dir, resolve_hf_cache_dir
 
 PROMPT = "tree . shrub . bush ."
 
@@ -62,15 +60,15 @@ class DendroDetector:
         groundingdino_dir = self._hf_cache_dir / "groundingdino"
         groundingdino_dir.mkdir(parents=True, exist_ok=True)
 
-        config_path = hf_hub_download(
+        config_path = ensure_local_hf_file(
             GROUNDING_REPO,
             GROUNDING_CONFIG,
-            cache_dir=str(groundingdino_dir),
+            groundingdino_dir,
         )
-        weights_path = hf_hub_download(
+        weights_path = ensure_local_hf_file(
             GROUNDING_REPO,
             GROUNDING_WEIGHTS,
-            cache_dir=str(groundingdino_dir),
+            groundingdino_dir,
         )
 
         model = load_model(str(config_path), str(weights_path))
@@ -85,10 +83,10 @@ class DendroDetector:
         sam2_dir.mkdir(parents=True, exist_ok=True)
 
         config_name, checkpoint_name = HF_MODEL_ID_TO_FILENAMES[SAM2_REPO]
-        ckpt_path   = hf_hub_download(
+        ckpt_path = ensure_local_hf_file(
             SAM2_REPO,
-            filename=checkpoint_name,
-            cache_dir=str(sam2_dir),
+            checkpoint_name,
+            sam2_dir,
         )
 
         sam_model_instance = build_sam2(

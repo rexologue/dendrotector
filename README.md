@@ -12,18 +12,18 @@ species-ranked predictions from a single photograph.
 
 - **Open-vocabulary detection** – GroundingDINO locates trees, shrubs and bushes
   based on the prompt `"tree . shrub . bush ."`, with configurable confidence
-  thresholds for both bounding boxes and text logits. 【F:dendrotector/detector.py†L42-L62】【F:dendrotector/detector.py†L86-L109】
+  thresholds for both bounding boxes and text logits.【F:dendrotector/detector.py†L42-L109】
 - **High-fidelity instance masks** – SAM 2 refines each detection into a binary
   mask and overlay, optionally selecting the best mask when multimask output is
-  enabled. 【F:dendrotector/detector.py†L110-L158】【F:dendrotector/detector.py†L182-L216】
+  enabled.【F:dendrotector/detector.py†L111-L157】【F:dendrotector/detector.py†L182-L216】
 - **Species suggestions** – A ViT-L/16 classifier fine-tuned on tree imagery
   returns the top-k most probable species for every instance, complete with
-  confidences and an auto-capped `k` if fewer classes are available. 【F:dendrotector/species_identifier.py†L15-L70】
+  confidences and an auto-capped `k` if fewer classes are available.【F:dendrotector/species_identifier.py†L15-L74】
 - **Geometric attributes** – Basic lean-angle estimation is calculated from each
-  mask, allowing quick screening of tilt or fall risk. 【F:dendrotector/detector.py†L248-L321】
+  mask, allowing quick screening of tilt or fall risk.【F:dendrotector/detector.py†L248-L321】
 - **Self-contained exports** – Each detection is written to its own
   `instance_XX/` directory with the mask, overlay, bbox crop, and structured
-  `report.json` describing scores, geometry, and species hypotheses. 【F:dendrotector/detector.py†L160-L223】
+  `report.json` describing scores, geometry, and species hypotheses.【F:dendrotector/detector.py†L160-L223】
 
 ## Project layout
 
@@ -55,78 +55,17 @@ The first run downloads the GroundingDINO, SAM 2, and species classifier weight
 from the Hugging Face Hub into `~/.dendrocache` (or a custom directory). The
 resolver also wires Hugging Face’s cache (`HF_HOME`/`HUGGINGFACE_HUB_CACHE`) to
 `~/.dendrocache/huggingface`, ensuring that every download lands inside the same
-volume-backed directory rather than the ephemeral container filesystem. Ensure
-that you are authenticated with `huggingface-cli login` if the models require
-access and that you have roughly 4 GB of free disk space for the larger SAM 2
-checkpoint. Override the cache location with the `DENDROCACHE_PATH`
-environment variable, the `--models-dir` CLI flag, or the `models_dir`
-constructor argument. 【F:dendrotector/__init__.py†L1-L42】【F:dendrotector/detector.py†L27-L78】【F:dendrotector/species_identifier.py†L19-L46】
+volume-backed directory rather than the ephemeral container filesystem.【F:dendrotector/__init__.py†L13-L122】
 
-### Docker deployment
+### Model cache behaviour
 
-The repository ships with `tools/run_api_container.sh`, a convenience script
-that builds the image and launches the FastAPI server with a bind-mounted model
-cache. Configure it through three environment variables:
+If you already have the checkpoints you can drop them into the cache hierarchy
+and they will be used as-is. `DendroDetector` and the species classifier look
+for exact filenames such as
+`~/.dendrocache/huggingface/sam2/<checkpoint>.pth` before contacting the Hugging
+Face Hub, falling back to a download only when the file is missing.【F:dendrotector/__init__.py†L74-L122】【F:dendrotector/detector.py†L63-L88】【F:dendrotector/species_identifier.py†L27-L44】
 
-```bash
-export PORT=8080            # Host port that will be forwarded to the container
-export DEVICE=cuda:0        # auto|cpu|cuda|cuda:N (defaults to auto)
-export DENDROCACHE_PATH=~/dendrocache  # Optional; defaults to ~/.dendrocache
-./tools/run_api_container.sh
-```
-
-When `DENDROCACHE_PATH` is unset the script mounts the host’s
-`~/.dendrocache` into `/root/.dendrocache` inside the container. If you do set
-`DENDROCACHE_PATH`, its absolute path is reused both on the host and inside the
-container so that the directory is always a Docker volume. In either case the
-script exports `HF_HOME` and `HUGGINGFACE_HUB_CACHE` to the same bind mount, so
-the Hugging Face Hub never duplicates checkpoints. The container is started with
-`-p ${PORT}:${PORT}` and uvicorn binds to `0.0.0.0:${PORT}`, meaning requests
-made to `http://<host>:${PORT}` from any machine on the network reach the
-FastAPI app directly—no extra port-forwarding steps are required. 【F:tools/run_api_container.sh†L1-L109】【F:Dockerfile†L16-L20】【F:dendrotector/api.py†L8-L56】
-
-### Hugging Face authentication
-
-Private Hugging Face repositories require a token. Export it via
-`DENDROTECTOR_HF_TOKEN`, `HF_TOKEN`, or `HUGGING_FACE_HUB_TOKEN` before running
-the helper script and the API will log in automatically during the first model
-initialisation. The Docker wrapper forwards any of these variables into the
-container without echoing the secret, and the FastAPI app prints a one-time
-notice that the initial download may take several minutes.
-
-```bash
-export DENDROTECTOR_HF_TOKEN="hf_..."
-./tools/run_api_container.sh
-```
-
-If you prefer interactive authentication you can still run `huggingface-cli
-login` inside the container.
-
-After the container is up you can submit a detection job with a simple `curl`
-command:
-
-```bash
-curl -X POST "http://localhost:${PORT}/detect?top_k=3" \
-  -F "image=@/path/to/trees.jpg" \
-  --output detections.zip
-```
-
-The response is a ZIP archive containing per-instance artefacts alongside a
-`summary.json` file with the total instance count. 【F:dendrotector/api.py†L58-L116】
-
-### Troubleshooting build issues
-
-The public PyPI wheel (`groundingdino-py`) omits CUDA sources, leading to
-errors similar to
-`cc1plus: fatal error: .../groundingdino/models/GroundingDINO/csrc/vision.cpp: No such file or directory`.
-This project pins the official Git repository instead, which includes the
-required files. If you build on Debian/Ubuntu, install system dependencies
-before `pip install`:
-
-```bash
-sudo apt-get update
-sudo apt-get install -y build-essential ninja-build
-```
+See [`APP.md`](APP.md) for containerised deployment and FastAPI usage.
 
 ## Command-line usage
 
@@ -151,7 +90,7 @@ Key options:
 The command exits with:
 - `0` when detections succeed (including the “no instances” case),
 - `1` if detection fails,
-- `2` if the input image is missing. 【F:example.py†L26-L104】
+- `2` if the input image is missing.【F:example.py†L26-L104】
 
 ## Python API
 
@@ -182,7 +121,7 @@ for inst in instance_dirs:
 contains the instance type (`tree` or `shrub`), detection score, pixel-aligned
 bounding box, optional lean angle, the final species pick, and the full top-k
 species list. Mask alpha channels are encoded in BGRA format for OpenCV
-compatibility. 【F:dendrotector/detector.py†L160-L233】
+compatibility.【F:dendrotector/detector.py†L160-L233】
 
 ## Output artifacts
 
@@ -195,16 +134,16 @@ For every detected instance, the pipeline saves:
   angle.
 
 The parent output directory mirrors your chosen input (e.g. `results/forest/`).
-If no detections are found the directory remains empty. 【F:dendrotector/detector.py†L160-L233】
+If no detections are found the directory remains empty.【F:dendrotector/detector.py†L160-L233】
 
 ## Performance notes
 
 - CUDA-capable GPUs drastically speed up GroundingDINO, SAM 2, and the species
-  classifier. If CUDA is unavailable the code automatically falls back to CPU. 【F:dendrotector/detector.py†L32-L74】【F:dendrotector/species_identifier.py†L33-L44】
+  classifier. If CUDA is unavailable the code automatically falls back to CPU.【F:dendrotector/detector.py†L31-L88】【F:dendrotector/species_identifier.py†L31-L44】
 - Lean-angle estimation expects reasonably vertical trees; very small or noisy
-  masks may yield `null` angles. 【F:dendrotector/detector.py†L248-L321】
+  masks may yield `null` angles.【F:dendrotector/detector.py†L248-L321】
 - The species classifier prints a warning if `top_k` exceeds the label count and
-  quietly clamps the value. 【F:dendrotector/species_identifier.py†L55-L70】
+  quietly clamps the value.【F:dendrotector/species_identifier.py†L55-L70】
 
 ## License
 
