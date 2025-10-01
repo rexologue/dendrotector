@@ -23,8 +23,8 @@ from huggingface_hub import snapshot_download
 from sam2.sam2_image_predictor import SAM2ImagePredictor
 from sam2.build_sam import HF_MODEL_ID_TO_FILENAMES, build_sam2
 
-from . import load_from_hf
-from .species_identifier import SpeciesIdentifier
+from utils import load_from_hf
+from species_identifier import SpeciesIdentifier
 
 PROMPT = "tree . shrub . bush ."
 
@@ -101,7 +101,7 @@ class DendroDetector:
 
         args = SLConfig.fromfile(str(config_path))
         args.device = self.device
-        args.text_encoder_type = bert_path
+        args.text_encoder_type = str(bert_path)
         model = build_model(args)
         checkpoint = torch.load(str(weights_path), map_location="cpu")
         model.load_state_dict(clean_state_dict(checkpoint["model"]), strict=False)

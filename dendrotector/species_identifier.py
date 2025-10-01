@@ -11,7 +11,7 @@ from PIL import Image
 from timm.data.transforms_factory import create_transform
 from timm.data.constants import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 
-from . import load_from_hf
+from utils import load_from_hf
 
 MODEL_NAME = "vit_large_patch16_384"
 MODEL_REPO = "rexologue/vit_large_384_for_trees"
@@ -30,6 +30,7 @@ class SpeciesIdentifier:
         self._models_dir.mkdir(parents=True, exist_ok=True)
 
         specifier_dir = self._models_dir / "specifier"
+        specifier_dir.mkdir(parents=True, exist_ok=True)
 
         labels_path = specifier_dir / "labels.json"
         ckpt_path = specifier_dir / "pytorch_model.bin"

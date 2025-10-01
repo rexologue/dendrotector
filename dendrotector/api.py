@@ -32,7 +32,7 @@ from huggingface_hub import login
 
 from sam2.build_sam import HF_MODEL_ID_TO_FILENAMES
 
-from .detector import DendroDetector, GROUNDING_WEIGHTS, GROUNDING_CONFIG, SAM2_REPO, PROMPT
+from detector import DendroDetector, GROUNDING_WEIGHTS, GROUNDING_CONFIG, SAM2_REPO, PROMPT
 
 app = FastAPI(
     title="DendroDetector API",
