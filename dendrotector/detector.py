@@ -5,6 +5,8 @@ import json
 from pathlib import Path
 from typing import List, Optional, Union
 
+import logging
+
 import cv2
 import torch
 import numpy as np
@@ -40,17 +42,29 @@ class DendroDetector:
         models_dir: Union[Path, str, None] = None,
     ) -> None:
 
+        self._log = logging.getLogger("dendrotector.detector")
+
+        self._log.debug("Requested device override: %s", device)
         self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
+        self._log.info("Using device %s", self.device)
         self.box_threshold = box_threshold
         self.text_threshold = text_threshold
 
         self._models_dir = resolve_cache_dir(models_dir)
         self._models_dir.mkdir(parents=True, exist_ok=True)
         self._hf_cache_dir = resolve_hf_cache_dir(self._models_dir)
+        self._log.info("Models directory: %s", self._models_dir)
+        self._log.info("Hugging Face cache directory: %s", self._hf_cache_dir)
 
+        self._log.info("Loading GroundingDINO model")
         self._dino_model = self._load_groundingdino()
+        self._log.info("GroundingDINO model ready")
+        self._log.info("Loading SAM 2 predictor")
         self._sam_predictor = self._load_sam2()
+        self._log.info("SAM 2 predictor ready")
+        self._log.info("Initialising species identifier")
         self._species_identifier = SpeciesIdentifier(self.device, self._models_dir) # type: ignore
+        self._log.info("Species identifier initialised")
 
     ################
     # LOAD METHODS #
@@ -59,17 +73,20 @@ class DendroDetector:
     def _load_groundingdino(self):
         groundingdino_dir = self._hf_cache_dir / "groundingdino"
         groundingdino_dir.mkdir(parents=True, exist_ok=True)
+        self._log.debug("GroundingDINO cache directory: %s", groundingdino_dir)
 
         config_path = ensure_local_hf_file(
             GROUNDING_REPO,
             GROUNDING_CONFIG,
             groundingdino_dir,
         )
+        self._log.info("GroundingDINO config available at %s", config_path)
         weights_path = ensure_local_hf_file(
             GROUNDING_REPO,
             GROUNDING_WEIGHTS,
             groundingdino_dir,
         )
+        self._log.info("GroundingDINO weights available at %s", weights_path)
 
         model = load_model(str(config_path), str(weights_path))
 
@@ -81,6 +98,7 @@ class DendroDetector:
     def _load_sam2(self) -> SAM2ImagePredictor:
         sam2_dir = self._hf_cache_dir / "sam2"
         sam2_dir.mkdir(parents=True, exist_ok=True)
+        self._log.debug("SAM 2 cache directory: %s", sam2_dir)
 
         config_name, checkpoint_name = HF_MODEL_ID_TO_FILENAMES[SAM2_REPO]
         ckpt_path = ensure_local_hf_file(
@@ -88,11 +106,12 @@ class DendroDetector:
             checkpoint_name,
             sam2_dir,
         )
+        self._log.info("SAM 2 checkpoint available at %s", ckpt_path)
 
         sam_model_instance = build_sam2(
-            config_file=config_name,      
+            config_file=config_name,
             ckpt_path=str(ckpt_path),
-            device=str(self.device),      
+            device=str(self.device),
         )
 
         return SAM2ImagePredictor(sam_model_instance)
@@ -122,6 +141,7 @@ class DendroDetector:
         image_path = Path(image_path).expanduser().resolve()
         output_dir = Path(output_dir).expanduser().resolve()
         output_dir.mkdir(parents=True, exist_ok=True)
+        self._log.info("Detecting instances in %s; results to %s", image_path, output_dir)
 
         # 1) Детекция боксами GroundingDINO
         image_source, image_tensor = load_image(str(image_path))
@@ -136,10 +156,12 @@ class DendroDetector:
 
         # Если ничего не нашли — ничего не пишем
         if boxes.shape[0] == 0:
+            self._log.info("GroundingDINO returned no boxes for %s", image_path)
             return []
 
         # Приводим боксы к XYXY в пикселях
         h, w = image_source.shape[:2]
+        self._log.debug("Image dimensions: width=%d height=%d", w, h)
         boxes_xyxy = box_ops.box_cxcywh_to_xyxy(boxes)
         boxes_xyxy *= torch.tensor([w, h, w, h], device=boxes_xyxy.device)
         boxes_xyxy = boxes_xyxy.cpu().numpy()
@@ -147,11 +169,13 @@ class DendroDetector:
 
         # 2) Маски SAM 2: получаем лучшую маску для каждого бокса
         self._sam_predictor.set_image(image_source)
+        self._log.debug("SAM 2 predictor initialised with input image")
 
         items: list[tuple[float, np.ndarray, np.ndarray, np.ndarray, str]] = []
         # (area_ratio, box_xyxy, mask_bool, logit_vec, phrase)
 
         for box_xyxy, logit_vec, phrase in zip(boxes_xyxy, logits, phrases):
+            self._log.debug("Predicting mask for box %s with phrase '%s'", box_xyxy, phrase)
             masks_np, iou_predictions_np, _ = self._sam_predictor.predict(
                 box=box_xyxy,
                 multimask_output=multimask_output,
@@ -168,14 +192,22 @@ class DendroDetector:
             area = int(mask_bool.sum())
             area_ratio = area / float(h * w) if h > 0 and w > 0 else 0.0
             items.append((area_ratio, box_xyxy, mask_bool, logit_vec, phrase))
+            self._log.debug(
+                "Mask ready: area=%d px (%.4f of image) with max logit %.4f",
+                area,
+                area_ratio,
+                float(np.max(logit_vec)),
+            )
 
         # 3) Сортируем инстансы по убыванию доли площади маски (крупные — первыми)
         items.sort(key=lambda t: t[0], reverse=True)
+        self._log.debug("Sorted %d candidate instance(s) by area", len(items))
 
         created_instance_dirs: List[Path] = []
 
         # 4) Сохраняем артефакты для каждого инстанса
         for idx, (area_ratio, box_xyxy, mask_bool, logit_vec, phrase) in enumerate(items):
+            self._log.debug("Writing artefacts for instance %d (area_ratio=%.4f)", idx, area_ratio)
             # --- безопасный клэмп координат ---
             # Клэмп под кроп (эксклюзивный правый/нижний край) — минимум 1px по каждой оси
             x0_c = max(0, min(int(round(box_xyxy[0])), w - 1))
@@ -232,6 +264,7 @@ class DendroDetector:
                 json.dump(report, fp, ensure_ascii=False, indent=2)
 
             created_instance_dirs.append(instance_dir)
+            self._log.debug("Instance %d artefacts stored in %s", idx, instance_dir)
 
         return created_instance_dirs
 
