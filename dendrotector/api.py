@@ -19,6 +19,7 @@ from __future__ import annotations
 import os
 import io
 import json
+import logging
 import zipfile
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -44,6 +45,42 @@ app = FastAPI(
 _detector_instance: DendroDetector | None = None
 _DEVICE_ENV_VAR = "DENDROTECTOR_DEVICE"
 _ANNOUNCED_DOWNLOAD = False
+_LOG_LEVEL_ENV = "DENDROTECTOR_LOG_LEVEL"
+
+
+def _configure_logging() -> logging.Logger:
+    """Return a configured logger for the API module."""
+
+    logger = logging.getLogger("dendrotector.api")
+    if logger.handlers:
+        return logger
+
+    level_name = os.getenv(_LOG_LEVEL_ENV, "INFO").upper()
+    level = getattr(logging, level_name, logging.INFO)
+
+    handler = logging.StreamHandler()
+    formatter = logging.Formatter(
+        "[%(asctime)s] [%(name)s] %(levelname)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+    handler.setFormatter(formatter)
+
+    logger.addHandler(handler)
+    logger.setLevel(level)
+    logger.propagate = False
+
+    package_logger = logging.getLogger("dendrotector")
+    if not package_logger.handlers:
+        package_logger.addHandler(handler)
+    package_logger.setLevel(level)
+    package_logger.propagate = False
+    package_logger.debug("Configured package logger at %s level", logging.getLevelName(level))
+
+    logger.debug("API logger initialised at %s level", logging.getLevelName(level))
+    return logger
+
+
+_LOGGER = _configure_logging()
 
 
 def _get_detector() -> DendroDetector:
@@ -51,10 +88,16 @@ def _get_detector() -> DendroDetector:
 
     global _detector_instance
     if _detector_instance is None:
+        _LOGGER.info("Detector not initialised yet; performing startup")
         ensure_hf_login()
         _announce_first_boot()
         requested_device = os.getenv(_DEVICE_ENV_VAR) or None
+        if requested_device:
+            _LOGGER.info("Initialising detector on device requested via %s=%s", _DEVICE_ENV_VAR, requested_device)
+        else:
+            _LOGGER.info("Initialising detector on auto-detected device")
         _detector_instance = DendroDetector(device=requested_device)
+        _LOGGER.info("Detector initialisation complete")
     return _detector_instance
 
 
@@ -65,11 +108,8 @@ def _announce_first_boot() -> None:
     if _ANNOUNCED_DOWNLOAD:
         return
 
-    print(
-        "[Dendrotector] Initialising detection models. "
-        "The first startup may download checkpoints from the Hugging Face Hub; "
-        "subsequent runs reuse the cache.",
-        flush=True,
+    _LOGGER.info(
+        "Initialising detection models. The first startup may download checkpoints from the Hugging Face Hub; subsequent runs reuse the cache."
     )
     _ANNOUNCED_DOWNLOAD = True
 
@@ -105,6 +145,14 @@ async def detect(
     if not contents:
         raise HTTPException(status_code=400, detail="Uploaded file is empty.")
 
+    _LOGGER.info(
+        "Received /detect request: filename=%s, top_k=%s, prompt_length=%d, multimask_output=%s",
+        filename,
+        top_k,
+        len(prompt),
+        multimask_output,
+    )
+
     with TemporaryDirectory() as tmp_dir:
         tmp_dir_path = Path(tmp_dir)
         input_path = tmp_dir_path / f"input{suffix}"
@@ -112,8 +160,10 @@ async def detect(
         output_dir.mkdir(parents=True, exist_ok=True)
 
         input_path.write_bytes(contents)
+        _LOGGER.debug("Stored uploaded image at %s (%d bytes)", input_path, len(contents))
 
         detector = _get_detector()
+        _LOGGER.info("Running detector.detect on %s", input_path)
         instance_dirs = detector.detect(
             image_path=input_path,
             output_dir=output_dir,
@@ -121,8 +171,10 @@ async def detect(
             prompt=prompt,
             multimask_output=multimask_output,
         )
+        _LOGGER.info("Detection finished with %d instance(s)", len(instance_dirs))
 
         summary_path = _write_summary(output_dir, instance_dirs)
+        _LOGGER.debug("Summary written to %s", summary_path)
 
         zip_buffer = io.BytesIO()
         with zipfile.ZipFile(zip_buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
@@ -131,8 +183,10 @@ async def detect(
                 if file_path.is_file():
                     arcname = Path("detections") / file_path.relative_to(output_dir)
                     archive.write(file_path, arcname.as_posix())
+                    _LOGGER.debug("Added %s to response archive", arcname)
 
         zip_buffer.seek(0)
+        _LOGGER.info("Prepared ZIP response for %s (%.1f KiB)", filename, len(zip_buffer.getbuffer()) / 1024)
         return StreamingResponse(
             zip_buffer,
             media_type="application/zip",

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import logging
 from pathlib import Path
 from typing import Optional, Union
 
@@ -30,6 +31,8 @@ _ENV_ALT_HF_TOKENS = (
 )
 
 _hf_login_attempted = False
+_CACHE_LOGGER = logging.getLogger("dendrotector.cache")
+_AUTH_LOGGER = logging.getLogger("dendrotector.auth")
 
 
 def _ensure_hf_environment(base: Path) -> None:
@@ -40,9 +43,11 @@ def _ensure_hf_environment(base: Path) -> None:
 
     if _ENV_HF_HOME not in os.environ:
         os.environ[_ENV_HF_HOME] = str(hf_cache)
+        _CACHE_LOGGER.debug("Set %s=%s", _ENV_HF_HOME, hf_cache)
 
     if _ENV_HF_CACHE not in os.environ:
         os.environ[_ENV_HF_CACHE] = str(hf_cache)
+        _CACHE_LOGGER.debug("Set %s=%s", _ENV_HF_CACHE, hf_cache)
 
 
 def _resolve_hf_token() -> Optional[str]:
@@ -77,6 +82,7 @@ def ensure_hf_login() -> None:
 
     token = _resolve_hf_token()
     if not token:
+        _AUTH_LOGGER.info("No Hugging Face token provided; proceeding without authentication")
         _hf_login_attempted = True
         return
 
@@ -84,28 +90,25 @@ def ensure_hf_login() -> None:
     # ``hf_hub_download`` automatically pick it up even if users only export the
     # Dendrotector-specific variable.
     os.environ.setdefault("HUGGING_FACE_HUB_TOKEN", token)
+    _AUTH_LOGGER.info("Attempting Hugging Face login with provided token")
 
     try:
         from huggingface_hub import login
     except Exception as exc:  # pragma: no cover - defensive guard
-        print(
-            "[Dendrotector] Warning: failed to import huggingface_hub for auth "
-            f"({exc}).",
-            flush=True,
-        )
+        _AUTH_LOGGER.warning("Failed to import huggingface_hub for auth: %s", exc)
         _hf_login_attempted = True
         return
 
     try:
         login(token=token, add_to_git_credential=False, new_session=False)
     except Exception as exc:  # pragma: no cover - provide feedback without aborting
-        print(
-            "[Dendrotector] Warning: Hugging Face authentication failed. "
-            f"Downloads may require 'huggingface-cli login'. Error: {exc}",
-            flush=True,
+        _AUTH_LOGGER.warning(
+            "Hugging Face authentication failed; downloads may require 'huggingface-cli login'. Error: %s",
+            exc,
         )
 
     _hf_login_attempted = True
+    _AUTH_LOGGER.info("Hugging Face login attempt finished")
 
 
 def resolve_cache_dir(
@@ -125,6 +128,7 @@ def resolve_cache_dir(
         base = Path(os.environ.get(ENV_CACHE_PATH, _DEFAULT_CACHE_PATH))
 
     resolved = base.expanduser().resolve()
+    _CACHE_LOGGER.debug("Resolved cache directory to %s", resolved)
     _ensure_hf_environment(resolved)
     return resolved
 
@@ -157,11 +161,15 @@ def ensure_local_hf_file(
 
     directory = Path(target_dir)
     directory.mkdir(parents=True, exist_ok=True)
+    _CACHE_LOGGER.debug(
+        "Ensuring local HF file repo=%s filename=%s target_dir=%s", repo_id, filename, directory
+    )
 
     local_name = local_filename or Path(filename).name
     local_path = directory / local_name
 
     if local_path.exists():
+        _CACHE_LOGGER.info("Reusing existing file %s", local_path)
         return local_path
 
     download_params = {
@@ -172,20 +180,26 @@ def ensure_local_hf_file(
         "local_dir_use_symlinks": False,
         **download_kwargs,
     }
+    _CACHE_LOGGER.info("Cached file missing, triggering Hugging Face download")
+    _CACHE_LOGGER.debug("hf_hub_download parameters: %s", download_params)
 
     if subfolder is not None:
         download_params.setdefault("subfolder", subfolder)
 
     downloaded = Path(hf_hub_download(**download_params))
+    _CACHE_LOGGER.info("Download finished; file available at %s", downloaded)
 
     if local_path.exists():
+        _CACHE_LOGGER.debug("Local path %s now exists after download", local_path)
         return local_path
 
     if downloaded.exists() and downloaded != local_path:
         try:
             shutil.copy2(downloaded, local_path)
+            _CACHE_LOGGER.debug("Copied downloaded file to %s", local_path)
             return local_path
         except OSError:
+            _CACHE_LOGGER.warning("Failed to copy %s to %s", downloaded, local_path)
             pass
 
     return local_path if local_path.exists() else downloaded
