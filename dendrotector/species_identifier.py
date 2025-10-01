@@ -11,6 +11,8 @@ from PIL import Image
 from timm.data.transforms_factory import create_transform
 from timm.data.constants import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 
+from . import load_from_hf
+
 MODEL_NAME = "vit_large_patch16_384"
 MODEL_REPO = "rexologue/vit_large_384_for_trees"
 
@@ -20,28 +22,23 @@ class SpeciesIdentifier:
     def __init__(
         self,
         device: str | None = None,
-        models_dir: Union[Path, str, None] = None,
+        models_dir: Path = Path("~/.dendrocache"),
     ) -> None:
         self.device = device
 
-        from . import ensure_local_hf_file, resolve_cache_dir, resolve_hf_cache_dir
+        self._models_dir = models_dir.expanduser().resolve()
+        self._models_dir.mkdir(parents=True, exist_ok=True)
 
-        self._models_dir = resolve_cache_dir(models_dir)
-        self._models_dir.mkdir(exist_ok=True)
+        specifier_dir = self._models_dir / "specifier"
 
-        model_dir = resolve_hf_cache_dir(self._models_dir) / "specifier"
-        model_dir.mkdir(parents=True, exist_ok=True)
+        labels_path = specifier_dir / "labels.json"
+        ckpt_path = specifier_dir / "pytorch_model.bin"
 
-        labels_path = ensure_local_hf_file(
-            MODEL_REPO,
-            "labels.json",
-            model_dir,
-        )
-        ckpt_path = ensure_local_hf_file(
-            MODEL_REPO,
-            "pytorch_model.bin",
-            model_dir,
-        )
+        if not labels_path.exists():
+            load_from_hf(MODEL_REPO, "labels.json", labels_path)
+
+        if not ckpt_path.exists():
+            load_from_hf(MODEL_REPO, "pytorch_model.bin", ckpt_path)
 
         with open(labels_path, "r", encoding="utf-8") as f:
             raw = json.load(f)
