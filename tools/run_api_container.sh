@@ -1,15 +1,19 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# Helper for building and launching the DendroDetector API container fast.
-
-# Env:
-#   IMAGE_NAME         – image tag (default: dendrotector-api)
-#   PORT               – host/container port (default: 8000)
-#   DEVICE             – auto|cpu|cuda|cuda:N (default: auto)
-#   DENDROCACHE_PATH   – host dir for HF/cache (default: ~/.dendrocache)
-#   DO_BUILD           – 1 to (re)build image, 0 to skip (default: 0)
-#   DEV                – 1 to mount source tree as a volume (fast iteration; default: 0)
+# Usage:
+#   PORT=58000 DEVICE=cuda MODELS_DIR=~/dendrocache ./tools/run_api_container.sh
+#
+# Description:
+#   Builds (optionally) and starts the Dendrotector FastAPI container with the
+#   requested device and model cache mount. Tweak behaviour through the
+#   following environment variables before invoking the script:
+#     IMAGE_NAME       – image tag (default: dendrotector-api)
+#     PORT             – host/container port (default: 8000)
+#     DEVICE           – auto|cpu|cuda|cuda:N (default: auto)
+#     MODELS_DIR       – host dir bound to /app/models (default: ~/.dendrocache)
+#     DO_BUILD         – 1 to (re)build the Docker image (default: 0)
+#     DEV              – 1 to mount the repo as /app for live-editing (default: 0)
 
 IMAGE_NAME=${IMAGE_NAME:-dendrotector-api}
 PORT=${PORT:-8000}
@@ -22,6 +26,14 @@ if ! [[ ${PORT} =~ ^[0-9]+$ ]]; then
   echo "Error: PORT must be numeric (got '${PORT}')." >&2
   exit 1
 fi
+
+MODELS_DIR_ABS=$(python - "${MODELS_DIR}" <<'PY'
+from pathlib import Path
+import sys
+print(Path(sys.argv[1]).expanduser().resolve())
+PY
+)
+mkdir -p "${MODELS_DIR_ABS}"
 
 GPU_ARGS=()
 DEVICE_ENV=""
@@ -63,7 +75,7 @@ RUN_ARGS=(
   -p "${PORT}:${PORT}"
   -e "PORT=${PORT}"
   -e "HF_TOKEN=${HF_TOKEN}"
-  -v "${MODELS_DIR}:/app/models"
+  -v "${MODELS_DIR_ABS}:/app/models"
 )
 
 # DEV mode: монтируем исходники вместо пересборки образа

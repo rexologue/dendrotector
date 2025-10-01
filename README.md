@@ -1,5 +1,9 @@
 # Dendrotector
 
+<p align="center">
+  <img src="assets/logo.png" alt="Stylised canopy view with the Dendrotector logotype" width="512">
+</p>
+
 Dendrotector is an end-to-end tree and shrub analysis toolkit built around the
 latest open-vocabulary detection and segmentation models. The package combines
 GroundingDINO for text-prompted object discovery, SAM 2 for crisp instance
@@ -65,7 +69,9 @@ for exact filenames such as
 `~/.dendrocache/huggingface/sam2/<checkpoint>.pth` before contacting the Hugging
 Face Hub, falling back to a download only when the file is missing.【F:dendrotector/__init__.py†L74-L122】【F:dendrotector/detector.py†L63-L88】【F:dendrotector/species_identifier.py†L27-L44】
 
-See [`APP.md`](APP.md) for containerised deployment and FastAPI usage.
+See [`APP.md`](APP.md) for containerised deployment and FastAPI usage, including
+the `tools/run_api_container.sh` helper for spinning up the FastAPI service with
+GPU passthrough and a shared model cache.
 
 ## Command-line usage
 
