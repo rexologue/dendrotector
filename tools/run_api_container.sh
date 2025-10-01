@@ -14,34 +14,9 @@ set -Eeuo pipefail
 IMAGE_NAME=${IMAGE_NAME:-dendrotector-api}
 PORT=${PORT:-8000}
 DEVICE=${DEVICE:-auto}
+HF_TOKEN=${HF_TOKEN:-not}
+MODELS_DIR=${MODELS_DIR:-~/.dendrocache}
 DEV=${DEV:-0}
-
-USER_SUPPLIED_CACHE=${DENDROCACHE_PATH-}
-RAW_CACHE_PATH=${DENDROCACHE_PATH:-$HOME/.dendrocache}
-
-HOST_CACHE_PATH=$(
-RAW_CACHE_PATH="$RAW_CACHE_PATH" python - <<'PY'
-import os
-raw = os.environ["RAW_CACHE_PATH"]
-print(os.path.abspath(os.path.expanduser(raw)))
-PY
-)
-
-if [[ -z ${HOST_CACHE_PATH} ]]; then
-  echo "Failed to resolve cache directory path." >&2
-  exit 1
-fi
-
-# Container cache path: respect explicit host path, else default to /root/.dendrocache
-if [[ -n ${USER_SUPPLIED_CACHE} ]]; then
-  CONTAINER_CACHE_PATH="${HOST_CACHE_PATH}"
-else
-  CONTAINER_CACHE_PATH="/root/.dendrocache"
-fi
-
-HF_CACHE_CONTAINER="${CONTAINER_CACHE_PATH}/huggingface"
-
-mkdir -p -- "${HOST_CACHE_PATH}" "${HOST_CACHE_PATH}/huggingface"
 
 if ! [[ ${PORT} =~ ^[0-9]+$ ]]; then
   echo "Error: PORT must be numeric (got '${PORT}')." >&2
@@ -87,10 +62,8 @@ RUN_ARGS=(
   docker run --rm
   -p "${PORT}:${PORT}"
   -e "PORT=${PORT}"
-  -e "DENDROCACHE_PATH=${CONTAINER_CACHE_PATH}"
-  -e "HF_HOME=${HF_CACHE_CONTAINER}"
-  -e "HUGGINGFACE_HUB_CACHE=${HF_CACHE_CONTAINER}"
-  -v "${HOST_CACHE_PATH}:${CONTAINER_CACHE_PATH}"
+  -e "HF_TOKEN=${HF_TOKEN}"
+  -v "${MODELS_DIR}:/app/models"
 )
 
 # DEV mode: монтируем исходники вместо пересборки образа
@@ -108,17 +81,9 @@ if [[ ${#GPU_ARGS[@]} -gt 0 ]]; then
   RUN_ARGS+=( "${GPU_ARGS[@]}" )
 fi
 
-FORWARDED_SECRET=0
-for token_var in DENDROTECTOR_HF_TOKEN HF_TOKEN HUGGING_FACE_HUB_TOKEN; do
-  if [[ -n ${!token_var-} ]]; then
-    RUN_ARGS+=( -e "${token_var}=${!token_var}" )
-    FORWARDED_SECRET=1
-  fi
-done
-
 RUN_ARGS+=( "${IMAGE_NAME}" )
 
-if [[ ${FORWARDED_SECRET} -eq 1 ]]; then
+if [[ "${HF_TOKEN}" != "not" ]]; then
   echo "Executing docker run with Hugging Face credentials forwarded (command redacted)."
 else
   echo "Executing: ${RUN_ARGS[*]}"

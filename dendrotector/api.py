@@ -21,15 +21,18 @@ import io
 import json
 import logging
 import zipfile
+from typing import List
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import List
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
 
-from . import ensure_hf_login
-from .detector import DendroDetector, PROMPT
+from huggingface_hub import login
+
+from sam2.build_sam import HF_MODEL_ID_TO_FILENAMES
+
+from .detector import DendroDetector, GROUNDING_WEIGHTS, GROUNDING_CONFIG, SAM2_REPO, PROMPT
 
 app = FastAPI(
     title="DendroDetector API",
@@ -41,77 +44,55 @@ app = FastAPI(
     ),
 )
 
+_MODELS_DIR = Path("/app/models")
+_DEVICE_ENV_VAR = "DENDROTECTOR_DEVICE"
+_HF_TOKEN = "HF_TOKEN"
+_LOGGER = logging.getLogger("dendrotector.detector")
 
 _detector_instance: DendroDetector | None = None
-_DEVICE_ENV_VAR = "DENDROTECTOR_DEVICE"
-_ANNOUNCED_DOWNLOAD = False
-_LOG_LEVEL_ENV = "DENDROTECTOR_LOG_LEVEL"
 
 
-def _configure_logging() -> logging.Logger:
-    """Return a configured logger for the API module."""
+def _check_models() -> bool:
+    _, sam2_checkpoint_name = HF_MODEL_ID_TO_FILENAMES[SAM2_REPO]
+        
+    dino_config = (_MODELS_DIR / "groundingdino" / GROUNDING_CONFIG).exists()
+    dino_weights = (_MODELS_DIR / "groundingdino" / GROUNDING_WEIGHTS).exists()
+    sam2_weights = (_MODELS_DIR / "sam2" / sam2_checkpoint_name).exists()
+    specifier_labels = (_MODELS_DIR / "specifier" / "labels.json").exists()
+    specifier_weights = (_MODELS_DIR / "specifier" / "pytorch_model.bin").exists()
 
-    logger = logging.getLogger("dendrotector.api")
-    if logger.handlers:
-        return logger
-
-    level_name = os.getenv(_LOG_LEVEL_ENV, "INFO").upper()
-    level = getattr(logging, level_name, logging.INFO)
-
-    handler = logging.StreamHandler()
-    formatter = logging.Formatter(
-        "[%(asctime)s] [%(name)s] %(levelname)s: %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
-    handler.setFormatter(formatter)
-
-    logger.addHandler(handler)
-    logger.setLevel(level)
-    logger.propagate = False
-
-    package_logger = logging.getLogger("dendrotector")
-    if not package_logger.handlers:
-        package_logger.addHandler(handler)
-    package_logger.setLevel(level)
-    package_logger.propagate = False
-    package_logger.debug("Configured package logger at %s level", logging.getLevelName(level))
-
-    logger.debug("API logger initialised at %s level", logging.getLevelName(level))
-    return logger
-
-
-_LOGGER = _configure_logging()
+    return dino_config and dino_weights and sam2_weights and specifier_labels and specifier_weights
 
 
 def _get_detector() -> DendroDetector:
     """Lazily instantiate the heavy detection pipeline."""
 
     global _detector_instance
+
     if _detector_instance is None:
         _LOGGER.info("Detector not initialised yet; performing startup")
-        ensure_hf_login()
-        _announce_first_boot()
-        requested_device = os.getenv(_DEVICE_ENV_VAR) or None
+
+        # Log In Hugging Face in case if models are not installed
+        if not _check_models():
+            token = os.getenv(_HF_TOKEN)
+
+            if not token:
+                _LOGGER.info("Models are not installed and HF TOKEN is not set! Set HF_TOKEN and run again!")
+                exit(-1)
+
+            login(token=token)
+
+        requested_device = os.getenv(_DEVICE_ENV_VAR)
+
         if requested_device:
             _LOGGER.info("Initialising detector on device requested via %s=%s", _DEVICE_ENV_VAR, requested_device)
         else:
             _LOGGER.info("Initialising detector on auto-detected device")
-        _detector_instance = DendroDetector(device=requested_device)
+
+        _detector_instance = DendroDetector(device=requested_device, models_dir=_MODELS_DIR)
         _LOGGER.info("Detector initialisation complete")
+
     return _detector_instance
-
-
-def _announce_first_boot() -> None:
-    """Emit a one-time startup message about potential model downloads."""
-
-    global _ANNOUNCED_DOWNLOAD
-    if _ANNOUNCED_DOWNLOAD:
-        return
-
-    _LOGGER.info(
-        "Initialising detection models. The first startup may download checkpoints from the Hugging Face Hub; subsequent runs reuse the cache."
-    )
-    _ANNOUNCED_DOWNLOAD = True
 
 
 def _write_summary(output_dir: Path, instance_dirs: List[Path]) -> Path:
