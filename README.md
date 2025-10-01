@@ -1,7 +1,7 @@
 # Dendrotector
 
 <p align="center">
-  <img src="assets/logo.png" alt="Stylised canopy view with the Dendrotector logotype" width="512">
+  <img src="assests/logo.png" alt="Stylised canopy view with the Dendrotector logotype" width="512">
 </p>
 
 Dendrotector is an end-to-end tree and shrub analysis toolkit built around the
