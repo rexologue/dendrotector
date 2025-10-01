@@ -116,6 +116,7 @@ def _write_summary(output_dir: Path, instance_dirs: List[Path]) -> Path:
 async def detect(
     image: UploadFile = File(..., description="Input photograph with trees or shrubs."),
     top_k: int = 1,
+    disease_score: float = 0.5,
     prompt: str = PROMPT,
     multimask_output: bool = False,
 ):
@@ -123,6 +124,9 @@ async def detect(
 
     if top_k <= 0:
         raise HTTPException(status_code=400, detail="top_k must be a positive integer.")
+    
+    if disease_score > 1.0 or disease_score < 0.0:
+        raise HTTPException(status_code=400, detail="disease_score must be in [0, 1.0] interval.")
 
     filename = image.filename or "uploaded_image"
     suffix = Path(filename).suffix or ".png"

@@ -147,6 +147,7 @@ class DendroDetector:
         image_path: os.PathLike[str] | str,
         output_dir: os.PathLike[str] | str,
         top_k: int,
+        disease_detection_score_threshold: float,
         api_format: bool = False,
         *,
         prompt: str = PROMPT,
@@ -275,7 +276,7 @@ class DendroDetector:
 
             species, k = self._species_identifier.identify(bbox_path, top_k)
 
-            bbox_labeled, diseases_detections = self._diseases_detector.detect(bbox_path, score_threshold=0.3)
+            bbox_labeled, diseases_detections = self._diseases_detector.detect(bbox_path, score_threshold=disease_detection_score_threshold)
 
             if len(diseases_detections) != 0:
                 cv2.imwrite(str(instance_dir / "disease.png"), bbox_labeled)
