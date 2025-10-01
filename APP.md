@@ -45,3 +45,7 @@ initialisation. The wrapper forwards `HF_TOKEN` into the container without echoi
 After the container is up you can submit a detection job with a simple `curl`
 command. The response is a ZIP archive containing per-instance artefacts
 alongside a `summary.json` file with the total instance count.【F:dendrotector/api.py†L58-L116】
+
+Each `instance_*` folder mirrors the CLI output: `overlay.png`, `bbox.png`, an
+optional `disease.png` if the pathology detector fired, and `report.json` with
+species probabilities plus structured disease scores.【F:dendrotector/detector.py†L249-L305】
