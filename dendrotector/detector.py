@@ -13,7 +13,12 @@ import numpy as np
 from PIL import Image
 
 from groundingdino.util import box_ops
-from groundingdino.util.inference import load_image, load_model, predict
+from groundingdino.models import build_model
+from groundingdino.util.slconfig import SLConfig
+from groundingdino.util.misc import clean_state_dict
+from groundingdino.util.inference import load_image, predict
+
+from huggingface_hub import snapshot_download
 
 from sam2.sam2_image_predictor import SAM2ImagePredictor
 from sam2.build_sam import HF_MODEL_ID_TO_FILENAMES, build_sam2
@@ -27,6 +32,8 @@ PROMPT = "tree . shrub . bush ."
 GROUNDING_REPO    = "ShilongLiu/GroundingDINO"
 GROUNDING_WEIGHTS = "groundingdino_swint_ogc.pth"
 GROUNDING_CONFIG  = "GroundingDINO_SwinT_OGC.cfg.py"
+
+BERT_REPO = "google-bert/bert-base-uncased"
 
 SAM2_REPO = "facebook/sam2-hiera-large"
 
@@ -75,8 +82,16 @@ class DendroDetector:
         groundingdino_dir = self._models_dir / "groundingdino"
         groundingdino_dir.mkdir(parents=True, exist_ok=True)
         
+        bert_path = groundingdino_dir / "bert"
         config_path = groundingdino_dir / GROUNDING_CONFIG
         weights_path = groundingdino_dir / GROUNDING_WEIGHTS
+
+        if not bert_path.exists():
+            snapshot_download(
+                repo_id=BERT_REPO,
+                local_dir=str(bert_path),  
+                cache_dir=None
+            )
 
         if not config_path.exists():
             load_from_hf(GROUNDING_REPO, GROUNDING_CONFIG, config_path)
@@ -84,7 +99,12 @@ class DendroDetector:
         if not weights_path.exists():
             load_from_hf(GROUNDING_REPO, GROUNDING_WEIGHTS, weights_path)
 
-        model = load_model(str(config_path), str(weights_path))
+        args = SLConfig.fromfile(str(config_path))
+        args.device = self.device
+        args.text_encoder_type = bert_path
+        model = build_model(args)
+        checkpoint = torch.load(str(weights_path), map_location="cpu")
+        model.load_state_dict(clean_state_dict(checkpoint["model"]), strict=False)
 
         model.to(self.device)
         model.eval()

@@ -57,11 +57,12 @@ def _check_models() -> bool:
         
     dino_config = (_MODELS_DIR / "groundingdino" / GROUNDING_CONFIG).exists()
     dino_weights = (_MODELS_DIR / "groundingdino" / GROUNDING_WEIGHTS).exists()
+    bert_repo = (_MODELS_DIR / "groundingdino" / "bert").exists()
     sam2_weights = (_MODELS_DIR / "sam2" / sam2_checkpoint_name).exists()
     specifier_labels = (_MODELS_DIR / "specifier" / "labels.json").exists()
     specifier_weights = (_MODELS_DIR / "specifier" / "pytorch_model.bin").exists()
 
-    return dino_config and dino_weights and sam2_weights and specifier_labels and specifier_weights
+    return dino_config and dino_weights and bert_repo and sam2_weights and specifier_labels and specifier_weights
 
 
 def _get_detector() -> DendroDetector:
